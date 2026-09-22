@@ -23,7 +23,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from evaluate.base import BaseEvaluator
+from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,13 @@
-"""run_all.py — Main CLI for running faithfulness evaluators.
+"""scripts/run_eval.py — Main CLI for running faithfulness evaluators.
+
+Run from the project root:
+
+    python scripts/run_eval.py --data data/sample.jsonl
 
 Usage examples
 --------------
 # Run all metrics (needs all dependencies installed):
-python evaluate/run_all.py \\
+python scripts/run_eval.py \\
     --data data/sample.jsonl \\
     --summary_col abstract_sum \\
     --metrics factcc fenice minicheck alignscore qafacteval \\
@@ -11,7 +15,7 @@ python evaluate/run_all.py \\
     --device cuda
 
 # Run only two metrics with offline model paths:
-python evaluate/run_all.py \\
+python scripts/run_eval.py \\
     --data data/my_dataset.jsonl \\
     --metrics minicheck alignscore \\
     --minicheck_model_path /mnt/models/Bespoke-MiniCheck-7B \\
@@ -19,7 +23,7 @@ python evaluate/run_all.py \\
     --output results/scores.jsonl
 
 # Evaluate an LLM-generated summary column:
-python evaluate/run_all.py \\
+python scripts/run_eval.py \\
     --data data/with_llm_sums.jsonl \\
     --summary_col llm_sum \\
     --metrics minicheck \\
@@ -35,6 +39,14 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Ensure src/ is on the Python path so `from evaluate.X import Y` works
+# when running this script directly (python scripts/run_eval.py).
+# ---------------------------------------------------------------------------
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 logging.basicConfig(
     level=logging.INFO,

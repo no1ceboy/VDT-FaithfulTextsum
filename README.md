@@ -178,23 +178,27 @@ A `.summary.tsv` file is also written alongside the output JSONL with per-metric
 
 ```
 VDT-FaithfulTextsum/
-├── README.md
-├── .gitignore
-├── requirements.txt
+├── src/
+│   ├── evaluate/               # Faithfulness metric library
+│   │   ├── __init__.py
+│   │   ├── base.py             # Abstract BaseEvaluator class
+│   │   ├── factcc_eval.py      # FactCC wrapper
+│   │   ├── fenice_eval.py      # FENICE wrapper
+│   │   ├── minicheck_eval.py   # MiniCheck wrapper
+│   │   ├── alignscore_eval.py  # AlignScore wrapper
+│   │   └── qafacteval_eval.py  # QAFactEval wrapper
+│   └── train/                  # Future: model training code
+│       └── __init__.py
+├── scripts/
+│   ├── run_eval.py             # Evaluation CLI entry point
+│   └── install_deps.sh         # Selective dependency installer
+├── configs/                    # Future: YAML/JSON experiment configs
 ├── data/
-│   └── sample.jsonl          # 1-record sample for smoke tests
-├── evaluate/
-│   ├── __init__.py
-│   ├── base.py               # Abstract base evaluator
-│   ├── run_all.py            # Main CLI entry point
-│   ├── factcc_eval.py        # FactCC wrapper
-│   ├── fenice_eval.py        # FENICE wrapper
-│   ├── minicheck_eval.py     # MiniCheck wrapper
-│   ├── alignscore_eval.py    # AlignScore wrapper
-│   └── qafacteval_eval.py    # QAFactEval wrapper
-├── results/                  # Evaluation outputs (gitignored)
-└── scripts/
-    └── install_deps.sh       # Selective dependency installer
+│   └── sample.jsonl            # 1-record sample for smoke tests
+├── results/                    # Evaluation outputs (gitignored)
+├── requirements.txt
+├── .gitignore
+└── README.md
 ```
 
 ---

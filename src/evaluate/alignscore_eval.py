@@ -26,7 +26,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from evaluate.base import BaseEvaluator
+from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
 
