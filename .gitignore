@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Evaluation results (large, not tracked)
+results/
+
+# Model checkpoints / caches
+models/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+.cache/
+huggingface/
+hf_cache/
+
+# Data (potentially large — track sample only)
+data/*.jsonl
+data/*.json
+!data/sample.jsonl
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Env files
+.env
+*.env
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
