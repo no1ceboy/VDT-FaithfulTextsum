@@ -1,0 +1,256 @@
+========================================================
+COMMANDS FOR SHARED COMPANY MACHINE — VDT-FaithfulTextsum
+========================================================
+
+Benchmarks & Models Quick Reference
+--------------------------------------------------------
+| Metric      | What it measures                                  | Default model / checkpoint                     |
+|-------------|---------------------------------------------------|------------------------------------------------|
+| FactCC      | NLI classifier: is the summary CORRECT given doc? | manueldeprada/FactCC  (BERT-base fine-tuned)   |
+| FENICE      | Claim extraction + NLI entailment per claim       | roberta-large-mnli  (NLI backbone)             |
+| MiniCheck   | Sentence-level grounding check                    | Bespoke-MiniCheck-7B  (7B LLM)                 |
+| AlignScore  | Unified alignment function (NLI + QA trained)     | AlignScore-large  (RoBERTa-large fine-tuned)   |
+| QAFactEval  | QA-based: generate Qs from summary, answer in doc | LERC-QUIP + T5-large QA/QG models              |
+
+Benchmark Details
+--------------------------------------------------------
+FactCC (Kryscinski et al., 2020)
+  - Frames faithfulness as NLI: given (document, summary), predict CORRECT or INCORRECT.
+  - Score = probability of the CORRECT class (0–1, higher = more faithful).
+  - Fast; good baseline. Designed for English; applies to Vietnamese with reduced calibration.
+
+FENICE (Scirè et al., 2024)
+  - Extracts atomic claims from the summary, then checks each claim via NLI against the source.
+  - Score = fraction of claims entailed by the source document (0–1).
+  - More fine-grained than FactCC; surfaces which specific claims are hallucinated.
+  - ⚠ Uses English coreference (fastcoref) — produces a score on Vietnamese but calibration is lower.
+
+MiniCheck (Tang et al., 2024)
+  - Splits summary into sentences, classifies each sentence as supported/not by the document.
+  - Score = mean sentence support probability across all sentences in the summary.
+  - Bespoke-MiniCheck-7B is a 7B LLM fine-tuned for this task; much stronger than smaller variants.
+  - Also outputs a binary prediction per sentence (1 = supported, 0 = not supported).
+
+AlignScore (Zha et al., 2023)
+  - Trains a unified alignment function on 7 NLI/QA/STS source tasks simultaneously.
+  - Score = alignment score between summary and source (0–1).
+  - AlignScore-large uses RoBERTa-large; more robust to domain shift than FactCC.
+  - Evaluation mode `nli_sp` (default) is the best-performing variant.
+
+QAFactEval (Fabbri et al., 2022)
+  - Generates questions from the summary (QG), answers them using the source document (QA),
+    then compares answers to expected answers using LERC-QUIP (learned QA metric).
+  - Score = aggregated LERC-QUIP answer similarity (normalised to 0–1).
+  - Most expensive metric to run (requires 3 separate model inferences per example).
+  - Best at catching specific entity/number hallucinations.
+
+
+========================================================
+1. Environment Setup (First Time Only)
+========================================================
+--------------------------------------------------------
+# A. Clone or copy the repo to the machine
+git clone <repo-url> VDT-FaithfulTextsum
+cd VDT-FaithfulTextsum
+
+# B. Create a virtual environment
+python -m venv .venv
+source .venv/bin/activate          # Linux/Mac
+# .venv\Scripts\activate           # Windows
+
+# C. Install base dependencies
+pip install -r requirements.txt
+
+# D. Install metric-specific packages
+#    (Run only what you need — see details below)
+
+# FactCC — already covered by requirements.txt (transformers + torch)
+
+# FENICE
+pip install FENICE
+python -m spacy download en_core_web_sm
+
+# MiniCheck (from git — do this on a machine WITH internet, then copy)
+pip install "minicheck @ git+https://github.com/Liyan06/MiniCheck.git@main"
+
+# AlignScore (clone + install)
+git clone https://github.com/yuh-zha/AlignScore /tmp/AlignScore
+pip install -e /tmp/AlignScore
+
+# QAFactEval (clone + install + download models)
+git clone https://github.com/salesforce/QAFactEval /tmp/QAFactEval
+pip install -e /tmp/QAFactEval
+bash /tmp/QAFactEval/download_models.sh
+# Then copy the downloaded models/ folder into your working directory:
+# cp -r /tmp/QAFactEval/models ./models
+
+
+========================================================
+2. Pre-download Model Checkpoints (With Internet)
+========================================================
+    Do this on a machine with internet access, then
+    transfer the model directories to the cluster.
+--------------------------------------------------------
+# FactCC  (~430 MB)
+python -c "
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+AutoTokenizer.from_pretrained('manueldeprada/FactCC', cache_dir='./models/factcc')
+AutoModelForSequenceClassification.from_pretrained('manueldeprada/FactCC', cache_dir='./models/factcc')
+"
+
+# FENICE NLI backbone — roberta-large-mnli  (~1.4 GB)
+python -c "
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+AutoTokenizer.from_pretrained('roberta-large-mnli', cache_dir='./models/roberta-large-mnli')
+AutoModelForSequenceClassification.from_pretrained('roberta-large-mnli', cache_dir='./models/roberta-large-mnli')
+"
+
+# MiniCheck — Bespoke-MiniCheck-7B  (~14 GB)
+python -c "
+from minicheck.minicheck import MiniCheck
+MiniCheck('Bespoke-MiniCheck-7B')
+# Default cache: ~/.cache/huggingface/hub/
+# Copy that directory to the cluster.
+"
+
+# AlignScore-large checkpoint  (~1.4 GB)
+pip install huggingface_hub
+python -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id='yzha/AlignScore',
+    filename='AlignScore-large.ckpt',
+    local_dir='./models/alignscore'
+)
+"
+
+# QAFactEval models are downloaded by the download_models.sh script above.
+# Expected in ./models/ after running it.
+
+
+========================================================
+3. GPU Allocation Checklist
+========================================================
+- Run `nvidia-smi` to find a free GPU (e.g., GPU 2).
+- Replace CUDA_VISIBLE_DEVICES=X below with your chosen GPU.
+- Replace /path/to/... with actual absolute paths to model files.
+- All commands are run from the VDT-FaithfulTextsum/ root directory.
+
+
+========================================================
+4. Run All Metrics — Human Summaries (abstract_sum)
+========================================================
+--------------------------------------------------------
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col abstract_sum \
+    --metrics factcc fenice minicheck alignscore qafacteval \
+    --output results/human_sum_scores.jsonl \
+    --device cuda \
+    --batch_size 8 \
+    --offline \
+    --factcc_model_path /path/to/models/factcc \
+    --fenice_model_path /path/to/models/roberta-large-mnli \
+    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B \
+    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt \
+    --qafacteval_model_path /path/to/models/qafacteval
+
+
+========================================================
+5. Run All Metrics — LLM Summaries (llm_sum)
+========================================================
+--------------------------------------------------------
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col llm_sum \
+    --metrics factcc fenice minicheck alignscore qafacteval \
+    --output results/llm_sum_scores.jsonl \
+    --device cuda \
+    --batch_size 8 \
+    --offline \
+    --factcc_model_path /path/to/models/factcc \
+    --fenice_model_path /path/to/models/roberta-large-mnli \
+    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B \
+    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt \
+    --qafacteval_model_path /path/to/models/qafacteval
+
+
+========================================================
+6. Run Individual Metrics (Selective)
+========================================================
+--------------------------------------------------------
+# FactCC only  (fastest, ~430 MB model)
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col abstract_sum \
+    --metrics factcc \
+    --output results/factcc_scores.jsonl \
+    --device cuda \
+    --offline \
+    --factcc_model_path /path/to/models/factcc
+
+# MiniCheck only  (best quality sentence-level, ~14 GB model)
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col abstract_sum \
+    --metrics minicheck \
+    --output results/minicheck_scores.jsonl \
+    --device cuda \
+    --offline \
+    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B
+
+# AlignScore only  (~1.4 GB checkpoint)
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col abstract_sum \
+    --metrics alignscore \
+    --output results/alignscore_scores.jsonl \
+    --device cuda \
+    --offline \
+    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt
+
+# QAFactEval only  (slowest; 3 model calls per example)
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/my_dataset.jsonl \
+    --summary_col abstract_sum \
+    --metrics qafacteval \
+    --output results/qafacteval_scores.jsonl \
+    --device cuda \
+    --offline \
+    --qafacteval_model_path /path/to/models/qafacteval
+
+
+========================================================
+7. Smoke Test (Single Record, 2 Light Metrics)
+========================================================
+--------------------------------------------------------
+CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
+    --data data/sample.jsonl \
+    --summary_col abstract_sum \
+    --metrics factcc minicheck \
+    --output results/smoke_test.jsonl \
+    --device cuda \
+    --offline \
+    --factcc_model_path /path/to/models/factcc \
+    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B
+
+# Expected output: results/smoke_test.jsonl (1 record with factcc_score and minicheck_score)
+# Expected:        results/smoke_test.summary.tsv (per-metric mean scores)
+
+
+========================================================
+8. Output Files Explained
+========================================================
+    All outputs written to results/ (gitignored).
+--------------------------------------------------------
+# scores.jsonl — one record per line, original fields + score columns:
+#   factcc_score        float [0,1]  probability of CORRECT class
+#   fenice_score        float [0,1]  fraction of claims entailed
+#   minicheck_score     float [0,1]  mean sentence support probability
+#   minicheck_pred      int   0/1    aggregate binary prediction
+#   alignscore_score    float [0,1]  alignment score
+#   qafacteval_score    float [0,1]  normalised LERC-QUIP score
+#   qafacteval_raw_score float       raw QAFactEval score
+
+# scores.summary.tsv — tab-separated mean scores per metric:
+#   metric  mean_score  count  n_nan
