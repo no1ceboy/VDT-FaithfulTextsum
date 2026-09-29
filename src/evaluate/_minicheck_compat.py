@@ -108,7 +108,6 @@ class MiniCheckCompatScorer:
         self,
         *,
         model_name: str = _SUPPORTED_MODEL,
-        model_path: str | Path | None = None,
         cache_dir: str | Path | None = None,
         batch_size: int = 16,
         device: str = "cuda",
@@ -130,30 +129,7 @@ class MiniCheckCompatScorer:
         offline = os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         model_reference = _MODEL_ID
         cache_path = Path(cache_dir) if cache_dir is not None else None
-        if model_path is not None:
-            model_path_obj = Path(model_path).expanduser().resolve()
-            if not model_path_obj.is_dir():
-                raise FileNotFoundError(f"MiniCheck model directory not found: {model_path_obj}")
-            weight_files = (
-                "model.safetensors",
-                "pytorch_model.bin",
-                "model.safetensors.index.json",
-                "pytorch_model.bin.index.json",
-            )
-            tokenizer_files = ("tokenizer.json", "spiece.model", "tokenizer_config.json")
-            if not (model_path_obj / "config.json").is_file() or not any(
-                (model_path_obj / filename).is_file() for filename in weight_files
-            ) or not any((model_path_obj / filename).is_file() for filename in tokenizer_files):
-                raise FileNotFoundError(
-                    f"{model_path_obj} is not a complete MiniCheck FLAN-T5 model folder. "
-                    "It must directly contain config.json, model weights, and tokenizer files. "
-                    "If the ZIP has an extra enclosing folder, point --minicheck_model_path "
-                    "at the inner folder."
-                )
-            model_reference = str(model_path_obj)
-            cache_path = None
-            offline = True
-        elif cache_path is not None and (cache_path / "config.json").is_file():
+        if cache_path is not None and (cache_path / "config.json").is_file():
             weight_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
             if any((cache_path / filename).is_file() for filename in weight_files):
                 model_reference = str(cache_path.resolve())

@@ -5,12 +5,14 @@ This procedure runs the packaged Python module directly; it does not call a
 Bash helper and does not install packages. Use the Python environment and
 model files already approved/provisioned on the company machine.
 
-1. Upload and extract the latest `VDT-FaithfulTextsum-repo-v3.zip` into a project directory.
-   It contains the full project source (evaluation and experimental SFT/GRPO),
-   tests, sample data, documentation, and dependency manifests. It does not
-   contain Python, installed packages, model weights, NLTK data, or private/
-   ignored datasets. Extract the separately uploaded model archives into the
-   project's `models/` folder as described below.
+1. Download the current source archive from
+   `https://github.com/no1ceboy/VDT-FaithfulTextsum/archive/refs/heads/main.zip`
+   (or upload the current checkout) and extract it into a project directory.
+   The source includes evaluation and experimental SFT/GRPO code, tests, sample
+   data, documentation, and dependency manifests. It does not contain Python,
+   installed packages, model weights, NLTK data, or ignored datasets. Extract
+   the separately uploaded model archives into the project's `models/` folder
+   as described below.
    Open a terminal with the IT-approved Python environment active, and change
    the working directory to the extracted project root.
 
@@ -32,18 +34,16 @@ model files already approved/provisioned on the company machine.
 
      models/
        factcc/                           # FactCC config.json + model weights
-       minicheck/                        # MiniCheck config.json + model weights + tokenizer files
-       roberta-large/                    # RoBERTa config/tokenizer files for AlignScore
+       hf-cache/                         # original Hugging Face cache ZIP; preserve its layout
        alignscore/AlignScore-large.ckpt
        nltk_data/tokenizers/punkt_tab/   # only if approved by IT/compliance
 
-   The AlignScore `.ckpt` contains its trained RoBERTa weights; its
-   `roberta-large` folder supplies only tokenizer/config files, not another
-   copy of the weights. MiniCheck needs its full FLAN-T5 checkpoint and
-   tokenizer. The commands below point directly at these extracted folders,
-   avoiding dependence on the internal layout of the Hugging Face cache. If
-   an archive has an extra enclosing folder, point the command at the inner
-   folder containing `config.json`, model weights, and tokenizer files.
+   Keep the Hugging Face cache ZIP's internal structure intact under
+   `models/hf-cache/`; it contains MiniCheck and the RoBERTa tokenizer/config
+   used by AlignScore. Do not flatten the `models--...`, `snapshots`, `refs`,
+   or `blobs` directories. `--hf_cache_dir` points to the cache root. The
+   AlignScore `.ckpt` contains its trained RoBERTa weights, so the HF cache
+   supplies only the tokenizer/config for that backbone.
 
    If approved, extract `punkt_tab.zip` inside
    `models/nltk_data/tokenizers/`, yielding
@@ -57,15 +57,10 @@ model files already approved/provisioned on the company machine.
 
 5. Run a 10-record smoke test. The required score inputs are `input`,
    `human_sum`, and `llm_sum`. ROUGE needs no checkpoint; the FactCC,
-   MiniCheck and AlignScore files are specified by the local paths below.
+   MiniCheck and AlignScore files are found through `models/hf-cache/` below.
    BERTScore is omitted until its separate multilingual encoder folder is uploaded.
 
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --factcc_model_path models/factcc --minicheck_model_path models/minicheck --alignscore_ckpt models/alignscore/AlignScore-large.ckpt --alignscore_backbone_path models/roberta-large --nltk_data_dir models/nltk_data --offline --batch_size 2 --limit 10 --output results/smoke.jsonl
-
-   If the uploaded files are still in a standard Hugging Face cache layout,
-   use `--hf_cache_dir models/hf-cache` instead of the two direct-model-folder
-   options above. The cache must contain complete snapshots for both
-   `lytang/MiniCheck-Flan-T5-Large` and `roberta-large`.
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --factcc_model_path models/factcc --alignscore_ckpt models/alignscore/AlignScore-large.ckpt --hf_cache_dir models/hf-cache --nltk_data_dir models/nltk_data --offline --batch_size 2 --limit 10 --output results/smoke.jsonl
 
 If that succeeds, rerun the same command without `--limit 10` and change the
 output path to `results/baseline.jsonl`. The input is JSONL, one record per

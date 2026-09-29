@@ -60,11 +60,9 @@ class MiniCheckCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "supports only 'flan-t5-large'"):
             MiniCheckCompatScorer(model_name="roberta-large")
 
-    def test_local_model_folder_loads_without_hub_lookup(self) -> None:
+    def test_offline_mode_uses_explicit_hugging_face_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            model_dir = Path(temporary)
-            for filename in ("config.json", "pytorch_model.bin", "spiece.model"):
-                (model_dir / filename).touch()
+            cache_dir = Path(temporary)
             tokenizer = SimpleNamespace(eos_token="</s>")
             model = MagicMock()
             model.to.return_value = model
@@ -73,12 +71,14 @@ class MiniCheckCompatibilityTests(unittest.TestCase):
             with (
                 patch("src.evaluate._minicheck_compat.AutoTokenizer.from_pretrained", return_value=tokenizer) as load_tokenizer,
                 patch("src.evaluate._minicheck_compat.AutoModelForSeq2SeqLM.from_pretrained", return_value=model) as load_model,
+                patch.dict("os.environ", {"HF_HUB_OFFLINE": "1"}),
             ):
-                MiniCheckCompatScorer(model_path=model_dir, device="cpu")
+                MiniCheckCompatScorer(cache_dir=cache_dir, device="cpu")
 
-            expected_path = str(model_dir.resolve())
-            self.assertEqual(load_tokenizer.call_args.args[0], expected_path)
-            self.assertEqual(load_model.call_args.args[0], expected_path)
+            self.assertEqual(load_tokenizer.call_args.args[0], "lytang/MiniCheck-Flan-T5-Large")
+            self.assertEqual(load_model.call_args.args[0], "lytang/MiniCheck-Flan-T5-Large")
+            self.assertEqual(load_tokenizer.call_args.kwargs["cache_dir"], str(cache_dir))
+            self.assertEqual(load_model.call_args.kwargs["cache_dir"], str(cache_dir))
             self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
             self.assertTrue(load_model.call_args.kwargs["local_files_only"])
 

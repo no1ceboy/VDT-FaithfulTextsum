@@ -34,12 +34,10 @@ class MiniCheckEvaluator(BaseEvaluator):
         device: str = "cuda",
         batch_size: int = 16,
         model_name: str = _DEFAULT_MODEL,
-        model_path: str | None = None,
         cache_dir: str | None = None,
         chunk_size: int | None = None,
     ) -> None:
         super().__init__(device=device, batch_size=batch_size)
-        self.model_path = model_path
         self.cache_dir = cache_dir
         self.model_name = model_name
         self.chunk_size = chunk_size
@@ -51,7 +49,6 @@ class MiniCheckEvaluator(BaseEvaluator):
         logger.info("Loading MiniCheck model: %s …", self.model_name)
         self._checker = MiniCheckCompatScorer(
             model_name=self.model_name,
-            model_path=self.model_path,
             batch_size=self.batch_size,
             cache_dir=self.cache_dir,
             device=self.device,

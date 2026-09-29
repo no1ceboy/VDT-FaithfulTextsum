@@ -4,9 +4,8 @@ Example:
     python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl \
         --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge \
         --factcc_model_path models/factcc \
-        --minicheck_model_path models/minicheck \
         --alignscore_ckpt models/alignscore/AlignScore-large.ckpt \
-        --alignscore_backbone_path models/roberta-large \
+        --hf_cache_dir models/hf-cache \
         --nltk_data_dir models/nltk_data --offline \
         --batch_size 2 --limit 10 --output results/smoke.jsonl
 """
@@ -79,7 +78,6 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
         registry["minicheck"] = partial(
             MiniCheckEvaluator,
             device=device,
-            model_path=str(_project_path(args.minicheck_model_path)) if args.minicheck_model_path else None,
             cache_dir=str(_project_path(args.hf_cache_dir)) if args.hf_cache_dir else None,
             batch_size=args.batch_size,
             chunk_size=args.minicheck_chunk_size,
@@ -91,7 +89,6 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
             AlignScoreEvaluator,
             device=device,
             model_path=args.alignscore_ckpt,
-            backbone_path=str(_project_path(args.alignscore_backbone_path)) if args.alignscore_backbone_path else None,
             cache_dir=str(_project_path(args.hf_cache_dir)) if args.hf_cache_dir else None,
             batch_size=args.batch_size,
             evaluation_mode=args.alignscore_mode,
@@ -251,13 +248,7 @@ def parse_args() -> argparse.Namespace:
         help="Local FactCC checkpoint root; relative paths resolve from the project root",
     )
     parser.add_argument("--minicheck_chunk_size", type=int, default=None, help="MiniCheck source word chunk length; default 500")
-    parser.add_argument(
-        "--minicheck_model_path",
-        default=None,
-        help="Local MiniCheck model folder containing config, weights, and tokenizer files",
-    )
     parser.add_argument("--alignscore_ckpt", default=None, help="Local AlignScore .ckpt file")
-    parser.add_argument("--alignscore_backbone_path", default=None, help="Local RoBERTa config/tokenizer folder; no base-model weights are needed")
     parser.add_argument("--alignscore_mode", default="nli_sp", choices=["nli_sp", "nli", "bin_sp", "bin"])
     parser.add_argument("--qafacteval_model_path", default="./models", help="Local QAFactEval model folder from download_models.sh")
     parser.add_argument("--hf_cache_dir", default=None, help="Shared local Hugging Face cache for MiniCheck and AlignScore")

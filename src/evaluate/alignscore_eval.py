@@ -41,14 +41,12 @@ class AlignScoreEvaluator(BaseEvaluator):
         self,
         device: str = "cuda",
         model_path: str | None = None,
-        backbone_path: str | None = None,
         cache_dir: str | None = None,
         batch_size: int = 8,
         evaluation_mode: str = "nli_sp",  # "nli_sp" | "nli" | "bin_sp" | "bin"
     ) -> None:
         super().__init__(device=device, model_path=model_path, batch_size=batch_size)
         self.evaluation_mode = evaluation_mode
-        self._backbone_path = backbone_path
         self._cache_dir = cache_dir
         # If omitted, resolve the checkpoint through the HF cache (supports
         # HF_HUB_OFFLINE when the file has already been transferred).
@@ -77,7 +75,6 @@ class AlignScoreEvaluator(BaseEvaluator):
 
         self._scorer = AlignScoreCompatScorer(
             ckpt_path=checkpoint_path,
-            model=self._backbone_path or "roberta-large",
             cache_dir=self._cache_dir,
             batch_size=self.batch_size,
             device=self.device,
