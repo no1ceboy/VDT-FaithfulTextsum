@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.evaluate.run_eval import _nltk_data_root, _project_path
+from src.evaluate.run_eval import _hf_cache_root, _nltk_data_root, _project_path
 
 
 class EvalCliPathTests(unittest.TestCase):
@@ -22,6 +22,14 @@ class EvalCliPathTests(unittest.TestCase):
             self.assertEqual(_nltk_data_root(str(root / "tokenizers")), root)
             self.assertEqual(_nltk_data_root(str(punkt_tab)), root)
             self.assertEqual(_nltk_data_root(str(punkt_tab / "english")), root)
+
+    def test_hf_cache_root_is_found_inside_wrapped_archive_folder(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vdt-hf-cache-test-") as temporary:
+            archive_root = Path(temporary) / "uploaded-cache"
+            actual_cache = archive_root / "huggingface" / "hub"
+            (actual_cache / "models--lytang--MiniCheck-Flan-T5-Large").mkdir(parents=True)
+
+            self.assertEqual(_hf_cache_root(str(archive_root)), actual_cache.resolve())
 
 
 if __name__ == "__main__":

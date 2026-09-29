@@ -23,7 +23,40 @@ from transformers import AutoTokenizer, RobertaConfig, RobertaModel
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_MODES = {"nli_sp", "nli", "bin_sp", "bin"}
-_MODEL_ID = "roberta-large"
+_MODEL_ID = "FacebookAI/roberta-large"
+
+
+def _load_backbone_assets(
+    model_reference: str,
+    cache_dir: str | Path | None,
+    offline: bool,
+) -> tuple[Any, RobertaConfig]:
+    """Load RoBERTa tokenizer/config, accepting canonical and legacy cache IDs."""
+    cache_path = str(Path(cache_dir).expanduser().resolve()) if cache_dir is not None else None
+    model_ids = [model_reference]
+    if model_reference in {"FacebookAI/roberta-large", "roberta-large"}:
+        model_ids = ["FacebookAI/roberta-large", "roberta-large"]
+
+    failures: list[OSError] = []
+    for repo_id in model_ids:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                repo_id, cache_dir=cache_path, local_files_only=offline
+            )
+            config = RobertaConfig.from_pretrained(
+                repo_id, cache_dir=cache_path, local_files_only=offline
+            )
+            return tokenizer, config
+        except OSError as exc:
+            failures.append(exc)
+
+    if offline and cache_path:
+        raise FileNotFoundError(
+            "AlignScore could not find the RoBERTa tokenizer/config in the local Hugging Face "
+            f"cache at {cache_path}. The cache must preserve a complete snapshot for either "
+            "FacebookAI/roberta-large or the legacy roberta-large ID."
+        ) from failures[-1]
+    raise failures[-1]
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -133,30 +166,8 @@ class AlignScoreCompatScorer:
             os.environ.get("HF_HUB_OFFLINE") == "1"
             or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         )
-        requested_model_path = Path(model).expanduser()
-        is_explicit_path = requested_model_path.is_absolute() or requested_model_path.parent != Path(".")
-        model_path = requested_model_path if requested_model_path.is_dir() else None
-        if is_explicit_path and model_path is None:
-            raise FileNotFoundError(f"AlignScore backbone folder not found: {requested_model_path}")
-        if model_path is not None:
-            if not (model_path / "config.json").is_file() or not any(
-                (model_path / name).is_file()
-                for name in ("tokenizer.json", "vocab.json", "vocab.txt", "spiece.model")
-            ):
-                raise FileNotFoundError(
-                    f"{model_path} is not a complete RoBERTa tokenizer/config folder. "
-                    "It must directly contain config.json and tokenizer files. If this is a "
-                    "Hugging Face cache, use --hf_cache_dir instead."
-                )
-            model = str(model_path.resolve())
-            offline = True
         hub_cache = str(Path(cache_dir).expanduser().resolve()) if cache_dir is not None else None
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model, cache_dir=hub_cache, local_files_only=offline
-        )
-        config = RobertaConfig.from_pretrained(
-            model, cache_dir=hub_cache, local_files_only=offline
-        )
+        self.tokenizer, config = _load_backbone_assets(model, hub_cache, offline)
         self.max_length = int(self.tokenizer.model_max_length)
         if self.max_length > 100_000:
             raise ValueError("Tokenizer has no finite model_max_length")

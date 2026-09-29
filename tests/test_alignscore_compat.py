@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from src.evaluate._alignscore_compat import (
     _aggregate_sentence_scores,
     _group_source_sentences,
+    _load_backbone_assets,
     _unwrap_state_dict,
 )
 
@@ -74,10 +75,38 @@ class AlignScoreCompatibilityTests(unittest.TestCase):
                 )
 
             expected_cache = str(cache_dir.resolve())
+            self.assertEqual(load_tokenizer.call_args.args[0], "FacebookAI/roberta-large")
+            self.assertEqual(load_config.call_args.args[0], "FacebookAI/roberta-large")
             self.assertEqual(load_tokenizer.call_args.kwargs["cache_dir"], expected_cache)
             self.assertEqual(load_config.call_args.kwargs["cache_dir"], expected_cache)
             self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
             self.assertTrue(load_config.call_args.kwargs["local_files_only"])
+
+    def test_backbone_loader_falls_back_to_legacy_cache_name(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tokenizer = object()
+            config = object()
+            with (
+                patch(
+                    "src.evaluate._alignscore_compat.AutoTokenizer.from_pretrained",
+                    side_effect=[OSError("canonical cache miss"), tokenizer],
+                ) as load_tokenizer,
+                patch(
+                    "src.evaluate._alignscore_compat.RobertaConfig.from_pretrained",
+                    return_value=config,
+                ) as load_config,
+            ):
+                actual_tokenizer, actual_config = _load_backbone_assets(
+                    "FacebookAI/roberta-large", temporary, offline=True
+                )
+
+            self.assertIs(actual_tokenizer, tokenizer)
+            self.assertIs(actual_config, config)
+            self.assertEqual(load_tokenizer.call_args_list[0].args[0], "FacebookAI/roberta-large")
+            self.assertEqual(load_tokenizer.call_args_list[1].args[0], "roberta-large")
+            self.assertEqual(load_config.call_args.args[0], "roberta-large")
 
 
 if __name__ == "__main__":

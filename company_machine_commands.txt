@@ -40,8 +40,12 @@ model files already approved/provisioned on the company machine.
 
    Keep the Hugging Face cache ZIP's internal structure intact under
    `models/hf-cache/`; it contains MiniCheck and the RoBERTa tokenizer/config
-   used by AlignScore. Do not flatten the `models--...`, `snapshots`, `refs`,
-   or `blobs` directories. `--hf_cache_dir` points to the cache root. The
+   used by AlignScore. The AlignScore cache entry may be named
+   `models--FacebookAI--roberta-large` or the legacy `models--roberta-large`.
+   Do not flatten the `models--...`, `snapshots`, `refs`, or `blobs`
+   directories. `--hf_cache_dir` points to the cache root; the CLI can also
+   locate it when the archive adds a common enclosing `huggingface/hub`
+   directory. The
    AlignScore `.ckpt` contains its trained RoBERTa weights, so the HF cache
    supplies only the tokenizer/config for that backbone.
 

@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+from collections import deque
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,36 @@ def _project_path(value: str) -> Path:
     """Resolve relative model paths from the repository root, not the shell cwd."""
     path = Path(value).expanduser()
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+
+
+def _hf_cache_root(value: str) -> Path:
+    """Find the actual HF Hub cache root, tolerating an enclosing archive folder."""
+    requested = _project_path(value)
+    if not requested.is_dir():
+        raise FileNotFoundError(f"Hugging Face cache directory not found: {requested}")
+
+    queue = deque([(requested, 0)])
+    visited: set[Path] = set()
+    while queue:
+        candidate, depth = queue.popleft()
+        if candidate in visited:
+            continue
+        visited.add(candidate)
+        try:
+            children = [child for child in candidate.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        if any(child.name.startswith("models--") for child in children):
+            if candidate != requested:
+                logger.info("Using nested Hugging Face cache root: %s", candidate)
+            return candidate
+        if depth < 3:
+            queue.extend(
+                (child, depth + 1)
+                for child in children
+                if child.name not in {".locks", "blobs", "refs", "snapshots"}
+            )
+    return requested
 
 
 def _nltk_data_root(value: str) -> Path:
@@ -333,7 +364,8 @@ def main() -> int:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     if args.hf_cache_dir:
-        cache_dir = str(Path(args.hf_cache_dir).expanduser().resolve())
+        cache_dir = str(_hf_cache_root(args.hf_cache_dir))
+        args.hf_cache_dir = cache_dir
         os.environ["HF_HUB_CACHE"] = cache_dir
         os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
 

@@ -139,8 +139,22 @@ class MiniCheckCompatScorer:
             "cache_dir": str(cache_path) if cache_path is not None else None,
             "local_files_only": offline,
         }
-        self.tokenizer = AutoTokenizer.from_pretrained(model_reference, **load_args)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_reference, **load_args)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_reference, **load_args)
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_reference, **load_args)
+        except OSError as exc:
+            if offline:
+                cache_description = (
+                    str(cache_path.resolve()) if cache_path is not None else "the default Hugging Face cache"
+                )
+                raise FileNotFoundError(
+                    "MiniCheck could not load its model from "
+                    f"{cache_description}. The cache must contain a complete snapshot for "
+                    "lytang/MiniCheck-Flan-T5-Large (config, tokenizer, and model weights). "
+                    "Pass --hf_cache_dir pointing to the directory that directly contains "
+                    "the models--... cache entries; do not point it inside snapshots/ or blobs/."
+                ) from exc
+            raise
         self.model.to(self.device).eval()
         if self.tokenizer.eos_token is None:
             raise ValueError("MiniCheck's FLAN-T5 tokenizer must define an EOS token")
