@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faithful-textsum-research"
+version = "0.1.0"
+description = "Research tools for evaluating factuality in Vietnamese summaries"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.0.0",
+  "transformers>=4.56.2,<5.0",
+  "tqdm>=4.66.0",
+  "huggingface_hub>=0.23.0",
+  "nltk>=3.9.1",
+  "sentencepiece>=0.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

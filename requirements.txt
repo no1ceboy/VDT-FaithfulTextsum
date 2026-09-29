@@ -1,25 +1,15 @@
-# Core deep learning & HuggingFace (install once, shared across metrics)
+# Shared runtime for FactCC and the CLI. Metric packages with conflicting
+# dependency requirements are intentionally installed in separate envs.
 torch>=2.0.0
-transformers>=4.40.0
-accelerate>=0.27.0
+# TRL 0.29.0 needs >=4.56.2; keep <5 pending full metric-stack validation.
+transformers>=4.56.2,<5.0
 tqdm>=4.66.0
 huggingface_hub>=0.23.0
+nltk>=3.9.1
+sentencepiece>=0.2.0
 
-# FactCC — no extra packages beyond transformers above
-
-# FENICE
-FENICE
-spacy>=3.7.0
-# After install, run: python -m spacy download en_core_web_sm
-
-# MiniCheck — installed from git (see install_deps.sh)
-# pip install "minicheck @ git+https://github.com/Liyan06/MiniCheck.git@main"
-
-# AlignScore — installed from cloned repo (see install_deps.sh)
-# git clone https://github.com/yuh-zha/AlignScore && pip install -e .
-
-# QAFactEval — installed from cloned repo (see install_deps.sh)
-# git clone https://github.com/salesforce/QAFactEval && pip install -e .
-
-# Utilities
-numpy>=1.24.0
+# Optional metric dependencies (install only in a compatible environment):
+# MiniCheck: inference-only FLAN-T5 adapter is bundled under src/evaluate/.
+# AlignScore: inference adapter is in the same directory; both need NLTK Punkt data.
+# FENICE: pip install FENICE  (upstream currently pins Transformers ~=4.38.2)
+# QAFactEval: clone https://github.com/salesforce/QAFactEval && pip install -e .

@@ -1,12 +1,8 @@
-"""FENICE evaluator.
+"""FENICE evaluator using the upstream ``score_batch`` API.
 
-Wraps the ``FENICE`` pip package for factual-consistency scoring.
-
-Offline usage: FENICE internally downloads NLI and coreference models from
-HuggingFace. For fully offline use, pre-download those models and set
-``TRANSFORMERS_OFFLINE=1`` + ``HF_HUB_OFFLINE=1`` in your environment, or
-pass ``model_path`` which will be forwarded to the FENICE ``nli_model``
-argument if the FENICE API supports it.
+FENICE loads its claim extractor and NLI checkpoints by Hugging Face
+repository ID. Offline runs need those repositories in the Hugging Face
+cache; the upstream API does not accept a checkpoint-path override.
 
 References
 ----------
@@ -21,14 +17,9 @@ import logging
 import warnings
 from typing import Any
 
-from tqdm import tqdm
-
 from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_NLI_MODEL = "roberta-large-mnli"
-
 
 class FENICEEvaluator(BaseEvaluator):
     """Wrapper around the FENICE factuality evaluator.
@@ -45,38 +36,35 @@ class FENICEEvaluator(BaseEvaluator):
     def __init__(
         self,
         device: str = "cuda",
-        model_path: str | None = None,
         batch_size: int = 8,
-        granularity: str = "sentence",  # "sentence" | "clause"
     ) -> None:
-        super().__init__(device=device, model_path=model_path, batch_size=batch_size)
-        self.granularity = granularity
-        self._nli_model_id = model_path or _DEFAULT_NLI_MODEL
+        super().__init__(device=device, batch_size=batch_size)
         self._fenice = None
 
     # ------------------------------------------------------------------
 
     def _load(self) -> None:
         try:
-            from fenice import Fenice  # type: ignore[import]
+            from metric.FENICE import FENICE  # type: ignore[import]
         except ImportError as exc:
             raise ImportError(
-                "FENICE is not installed. Run: pip install FENICE"
+                "FENICE is not installed. Install the Babelscape/FENICE "
+                "repository and its pinned dependencies."
             ) from exc
 
-        logger.info("Loading FENICE (NLI model: %s) …", self._nli_model_id)
+        logger.info("Loading upstream FENICE models from the local HF cache …")
         warnings.warn(
-            "FENICE was designed for English. Scores on Vietnamese text are "
-            "computed but may be less calibrated.",
+            "FENICE was developed and evaluated primarily on English; interpret "
+            "Vietnamese scores as exploratory.",
             UserWarning,
             stacklevel=2,
         )
-        # FENICE constructor accepts device and nli_model_name
-        self._fenice = Fenice(
-            device=self.device,
-            nli_model_name=self._nli_model_id,
-            granularity=self.granularity,
-        )
+        if self.device.startswith("cuda"):
+            import torch
+
+            if ":" in self.device:
+                torch.cuda.set_device(int(self.device.split(":", 1)[1]))
+        self._fenice = FENICE()
 
     # ------------------------------------------------------------------
 
@@ -87,23 +75,23 @@ class FENICEEvaluator(BaseEvaluator):
         summary_col: str,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-
-        for record in tqdm(records, desc="FENICE", unit="doc"):
-            source = record[source_col]
-            summary = record[summary_col]
-            try:
-                score = self._fenice.score(article=source, summary=summary)
-                # FENICE returns a dict with 'score' key (float in [0,1])
-                if isinstance(score, dict):
-                    score_val = float(score.get("score", score.get("fenice_score", 0.0)))
-                else:
-                    score_val = float(score)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("FENICE failed on record (id=%s): %s", record.get("id"), exc)
-                score_val = float("nan")
-
-            out = dict(record)
-            out[f"{self.metric_name}_score"] = round(score_val, 6)
-            results.append(out)
-
+        for start in range(0, len(records), self.batch_size):
+            batch = records[start : start + self.batch_size]
+            inputs = [
+                {"document": str(record[source_col]), "summary": str(record[summary_col])}
+                for record in batch
+            ]
+            scores = self._fenice.score_batch(inputs)
+            if len(scores) != len(batch):
+                raise RuntimeError(
+                    f"FENICE returned {len(scores)} scores for {len(batch)} records"
+                )
+            for record, score in zip(batch, scores):
+                out = dict(record)
+                out[f"{self.metric_name}_score"] = round(float(score["score"]), 6)
+                results.append(out)
+            # The upstream implementation caches all claim alignments. Clear
+            # those per-batch caches to keep memory bounded on large datasets.
+            for cache_name in ("sentences_cache", "coref_clusters_cache", "claims_cache", "alignments_cache"):
+                getattr(self._fenice, cache_name, {}).clear()
         return results

@@ -1,256 +1,118 @@
-========================================================
-COMMANDS FOR SHARED COMPANY MACHINE — VDT-FaithfulTextsum
-========================================================
+VDT-FaithfulTextsum: company-machine usage
+==========================================
 
-Benchmarks & Models Quick Reference
---------------------------------------------------------
-| Metric      | What it measures                                  | Default model / checkpoint                     |
-|-------------|---------------------------------------------------|------------------------------------------------|
-| FactCC      | NLI classifier: is the summary CORRECT given doc? | manueldeprada/FactCC  (BERT-base fine-tuned)   |
-| FENICE      | Claim extraction + NLI entailment per claim       | roberta-large-mnli  (NLI backbone)             |
-| MiniCheck   | Sentence-level grounding check                    | Bespoke-MiniCheck-7B  (7B LLM)                 |
-| AlignScore  | Unified alignment function (NLI + QA trained)     | AlignScore-large  (RoBERTa-large fine-tuned)   |
-| QAFactEval  | QA-based: generate Qs from summary, answer in doc | LERC-QUIP + T5-large QA/QG models              |
+This procedure runs the packaged Python module directly; it does not call a
+Bash helper and does not install packages. Use the Python environment and
+model files already approved/provisioned on the company machine.
 
-Benchmark Details
---------------------------------------------------------
-FactCC (Kryscinski et al., 2020)
-  - Frames faithfulness as NLI: given (document, summary), predict CORRECT or INCORRECT.
-  - Score = probability of the CORRECT class (0–1, higher = more faithful).
-  - Fast; good baseline. Designed for English; applies to Vietnamese with reduced calibration.
+1. Upload and extract the latest `VDT-FaithfulTextsum-repo-v3.zip` into a project directory.
+   It contains the full project source (evaluation and experimental SFT/GRPO),
+   tests, sample data, documentation, and dependency manifests. It does not
+   contain Python, installed packages, model weights, NLTK data, or private/
+   ignored datasets. Extract the separately uploaded model archives into the
+   project's `models/` folder as described below.
+   Open a terminal with the IT-approved Python environment active, and change
+   the working directory to the extracted project root.
 
-FENICE (Scirè et al., 2024)
-  - Extracts atomic claims from the summary, then checks each claim via NLI against the source.
-  - Score = fraction of claims entailed by the source document (0–1).
-  - More fine-grained than FactCC; surfaces which specific claims are hallucinated.
-  - ⚠ Uses English coreference (fastcoref) — produces a score on Vietnamese but calibration is lower.
+2. From the extracted repository root, check the module command and approved
+   Python dependencies. No custom PYTHONPATH or project installation is needed:
 
-MiniCheck (Tang et al., 2024)
-  - Splits summary into sentences, classifies each sentence as supported/not by the document.
-  - Score = mean sentence support probability across all sentences in the summary.
-  - Bespoke-MiniCheck-7B is a 7B LLM fine-tuned for this task; much stronger than smaller variants.
-  - Also outputs a binary prediction per sentence (1 = supported, 0 = not supported).
+  python -m src.evaluate.run_eval --help
+  python -c "import torch, transformers, nltk, sentencepiece; print('torch', torch.__version__, 'transformers', transformers.__version__, 'cuda', torch.cuda.is_available())"
 
-AlignScore (Zha et al., 2023)
-  - Trains a unified alignment function on 7 NLI/QA/STS source tasks simultaneously.
-  - Score = alignment score between summary and source (0–1).
-  - AlignScore-large uses RoBERTa-large; more robust to domain shift than FactCC.
-  - Evaluation mode `nli_sp` (default) is the best-performing variant.
+3. NLTK's `punkt_tab` data is separate from model checkpoints. The
+   `VDT-FaithfulTextsum-punkt_tab.zip` is from NLTK's official data repository,
+   but the current inventory lists it without a declared license. Transfer and
+   use it only if company IT/compliance approves. If approved, Step 4 gives the
+   exact extraction location; otherwise ask IT to provide an approved NLTK
+   data path.
 
-QAFactEval (Fabbri et al., 2022)
-  - Generates questions from the summary (QG), answers them using the source document (QA),
-    then compares answers to expected answers using LERC-QUIP (learned QA metric).
-  - Score = aggregated LERC-QUIP answer similarity (normalised to 0–1).
-  - Most expensive metric to run (requires 3 separate model inferences per example).
-  - Best at catching specific entity/number hallucinations.
+4. From the project root, create/use its `models/` directory and extract the
+   already-uploaded model archives into this layout:
 
+     models/
+       factcc/                           # FactCC config.json + model weights
+       minicheck/                        # MiniCheck config.json + model weights + tokenizer files
+       roberta-large/                    # RoBERTa config/tokenizer files for AlignScore
+       alignscore/AlignScore-large.ckpt
+       nltk_data/tokenizers/punkt_tab/   # only if approved by IT/compliance
 
-========================================================
-1. Environment Setup (First Time Only)
-========================================================
---------------------------------------------------------
-# A. Clone or copy the repo to the machine
-git clone <repo-url> VDT-FaithfulTextsum
-cd VDT-FaithfulTextsum
+   The AlignScore `.ckpt` contains its trained RoBERTa weights; its
+   `roberta-large` folder supplies only tokenizer/config files, not another
+   copy of the weights. MiniCheck needs its full FLAN-T5 checkpoint and
+   tokenizer. The commands below point directly at these extracted folders,
+   avoiding dependence on the internal layout of the Hugging Face cache. If
+   an archive has an extra enclosing folder, point the command at the inner
+   folder containing `config.json`, model weights, and tokenizer files.
 
-# B. Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate          # Linux/Mac
-# .venv\Scripts\activate           # Windows
+   If approved, extract `punkt_tab.zip` inside
+   `models/nltk_data/tokenizers/`, yielding
+   `models/nltk_data/tokenizers/punkt_tab/english/...`.
+   `--nltk_data_dir` must point to the `nltk_data` directory (parent of
+   `tokenizers`), not to `punkt_tab` or a Python package directory.
+   If FactCC is included, `models/factcc/` must directly contain `config.json`,
+   model weights, and tokenizer files such as `vocab.txt`; the CLI resolves this
+   relative path from the project root and reports a clear error if the ZIP
+   added another enclosing folder.
 
-# C. Install base dependencies
-pip install -r requirements.txt
+5. Run a 10-record smoke test. The required score inputs are `input`,
+   `human_sum`, and `llm_sum`. ROUGE needs no checkpoint; the FactCC,
+   MiniCheck and AlignScore files are specified by the local paths below.
+   BERTScore is omitted until its separate multilingual encoder folder is uploaded.
 
-# D. Install metric-specific packages
-#    (Run only what you need — see details below)
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --factcc_model_path models/factcc --minicheck_model_path models/minicheck --alignscore_ckpt models/alignscore/AlignScore-large.ckpt --alignscore_backbone_path models/roberta-large --nltk_data_dir models/nltk_data --offline --batch_size 2 --limit 10 --output results/smoke.jsonl
 
-# FactCC — already covered by requirements.txt (transformers + torch)
+   If the uploaded files are still in a standard Hugging Face cache layout,
+   use `--hf_cache_dir models/hf-cache` instead of the two direct-model-folder
+   options above. The cache must contain complete snapshots for both
+   `lytang/MiniCheck-Flan-T5-Large` and `roberta-large`.
 
-# FENICE
-pip install FENICE
-python -m spacy download en_core_web_sm
+If that succeeds, rerun the same command without `--limit 10` and change the
+output path to `results/baseline.jsonl`. The input is JSONL, one record per
+line, with `input`, `human_sum`, and `llm_sum` fields. Output includes one row
+per input, metric columns, aggregate means/counts in a TSV, and an errors TSV
+if any metric fails. `--device cpu` is a slower fallback if CUDA is
+unavailable or runs out of memory.
 
-# MiniCheck (from git — do this on a machine WITH internet, then copy)
-pip install "minicheck @ git+https://github.com/Liyan06/MiniCheck.git@main"
+ROUGE-1/2/L use a local, no-stemming implementation; `llm_sum__rouge_score` is
+ROUGE-L F1, and its mean is reported in the summary TSV. ROUGE and BERTScore
+compare `llm_sum` against `human_sum`; they do not judge source faithfulness.
+The human-reference row is null for those two metrics to avoid a perfect
+self-match. BERTScore is implemented with the already-provisioned
+PyTorch/Transformers packages and does not need the separate `bert-score`
+package, but it does need its own local model folder. When that folder has
+been uploaded to `models/bert-base-multilingual-cased`,
+run BERTScore with:
 
-# AlignScore (clone + install)
-git clone https://github.com/yuh-zha/AlignScore /tmp/AlignScore
-pip install -e /tmp/AlignScore
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_col llm_sum --metrics bertscore --bertscore_model_path models/bert-base-multilingual-cased --offline --batch_size 2 --output results/bertscore.jsonl
 
-# QAFactEval (clone + install + download models)
-git clone https://github.com/salesforce/QAFactEval /tmp/QAFactEval
-pip install -e /tmp/QAFactEval
-bash /tmp/QAFactEval/download_models.sh
-# Then copy the downloaded models/ folder into your working directory:
-# cp -r /tmp/QAFactEval/models ./models
+To run only ROUGE, use:
 
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_col llm_sum --metrics rouge --output results/rouge.jsonl
 
-========================================================
-2. Pre-download Model Checkpoints (With Internet)
-========================================================
-    Do this on a machine with internet access, then
-    transfer the model directories to the cluster.
---------------------------------------------------------
-# FactCC  (~430 MB)
-python -c "
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-AutoTokenizer.from_pretrained('manueldeprada/FactCC', cache_dir='./models/factcc')
-AutoModelForSequenceClassification.from_pretrained('manueldeprada/FactCC', cache_dir='./models/factcc')
-"
+That command needs no checkpoint, NLTK data, or extra dependency.
 
-# FENICE NLI backbone — roberta-large-mnli  (~1.4 GB)
-python -c "
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-AutoTokenizer.from_pretrained('roberta-large-mnli', cache_dir='./models/roberta-large-mnli')
-AutoModelForSequenceClassification.from_pretrained('roberta-large-mnli', cache_dir='./models/roberta-large-mnli')
-"
+FENICE and QAFactEval are separate cases. The current FENICE adapter can load
+the upstream package, but FENICE pins Transformers ~=4.38.2, conflicting with
+this project's >=4.56.2 stack. Its upstream license is CC BY-NC-SA 4.0, so do
+not use it for company work unless compliance approves. QAFactEval's official
+code requires its own package and model tree, so ask IT to provision a
+compatible Python environment; its adapter is available with:
 
-# MiniCheck — Bespoke-MiniCheck-7B  (~14 GB)
-python -c "
-from minicheck.minicheck import MiniCheck
-MiniCheck('Bespoke-MiniCheck-7B')
-# Default cache: ~/.cache/huggingface/hub/
-# Copy that directory to the cluster.
-"
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols llm_sum --metrics qafacteval --qafacteval_model_path models/qafacteval --offline --batch_size 2 --output results/qafacteval.jsonl
 
-# AlignScore-large checkpoint  (~1.4 GB)
-pip install huggingface_hub
-python -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download(
-    repo_id='yzha/AlignScore',
-    filename='AlignScore-large.ckpt',
-    local_dir='./models/alignscore'
-)
-"
+Run that separately in the approved environment if dependencies conflict,
+writing a separate output file. Check the downloaded model assets' terms as
+well as the upstream code license.
 
-# QAFactEval models are downloaded by the download_models.sh script above.
-# Expected in ./models/ after running it.
+If a dependency or NLTK resource is missing, retain the error and ask IT to
+provision it. Do not use pip, Hub downloads, or the repository's local
+dependency installer on the company machine. Scores on Vietnamese are
+exploratory; ROUGE is lexical overlap and BERTScore's multilingual encoder is
+not a factual-consistency metric.
 
-
-========================================================
-3. GPU Allocation Checklist
-========================================================
-- Run `nvidia-smi` to find a free GPU (e.g., GPU 2).
-- Replace CUDA_VISIBLE_DEVICES=X below with your chosen GPU.
-- Replace /path/to/... with actual absolute paths to model files.
-- All commands are run from the VDT-FaithfulTextsum/ root directory.
-
-
-========================================================
-4. Run All Metrics — Human Summaries (abstract_sum)
-========================================================
---------------------------------------------------------
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col abstract_sum \
-    --metrics factcc fenice minicheck alignscore qafacteval \
-    --output results/human_sum_scores.jsonl \
-    --device cuda \
-    --batch_size 8 \
-    --offline \
-    --factcc_model_path /path/to/models/factcc \
-    --fenice_model_path /path/to/models/roberta-large-mnli \
-    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B \
-    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt \
-    --qafacteval_model_path /path/to/models/qafacteval
-
-
-========================================================
-5. Run All Metrics — LLM Summaries (llm_sum)
-========================================================
---------------------------------------------------------
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col llm_sum \
-    --metrics factcc fenice minicheck alignscore qafacteval \
-    --output results/llm_sum_scores.jsonl \
-    --device cuda \
-    --batch_size 8 \
-    --offline \
-    --factcc_model_path /path/to/models/factcc \
-    --fenice_model_path /path/to/models/roberta-large-mnli \
-    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B \
-    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt \
-    --qafacteval_model_path /path/to/models/qafacteval
-
-
-========================================================
-6. Run Individual Metrics (Selective)
-========================================================
---------------------------------------------------------
-# FactCC only  (fastest, ~430 MB model)
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col abstract_sum \
-    --metrics factcc \
-    --output results/factcc_scores.jsonl \
-    --device cuda \
-    --offline \
-    --factcc_model_path /path/to/models/factcc
-
-# MiniCheck only  (best quality sentence-level, ~14 GB model)
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col abstract_sum \
-    --metrics minicheck \
-    --output results/minicheck_scores.jsonl \
-    --device cuda \
-    --offline \
-    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B
-
-# AlignScore only  (~1.4 GB checkpoint)
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col abstract_sum \
-    --metrics alignscore \
-    --output results/alignscore_scores.jsonl \
-    --device cuda \
-    --offline \
-    --alignscore_ckpt /path/to/models/alignscore/AlignScore-large.ckpt
-
-# QAFactEval only  (slowest; 3 model calls per example)
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/my_dataset.jsonl \
-    --summary_col abstract_sum \
-    --metrics qafacteval \
-    --output results/qafacteval_scores.jsonl \
-    --device cuda \
-    --offline \
-    --qafacteval_model_path /path/to/models/qafacteval
-
-
-========================================================
-7. Smoke Test (Single Record, 2 Light Metrics)
-========================================================
---------------------------------------------------------
-CUDA_VISIBLE_DEVICES=X python scripts/run_eval.py \
-    --data data/sample.jsonl \
-    --summary_col abstract_sum \
-    --metrics factcc minicheck \
-    --output results/smoke_test.jsonl \
-    --device cuda \
-    --offline \
-    --factcc_model_path /path/to/models/factcc \
-    --minicheck_model_path /path/to/models/Bespoke-MiniCheck-7B
-
-# Expected output: results/smoke_test.jsonl (1 record with factcc_score and minicheck_score)
-# Expected:        results/smoke_test.summary.tsv (per-metric mean scores)
-
-
-========================================================
-8. Output Files Explained
-========================================================
-    All outputs written to results/ (gitignored).
---------------------------------------------------------
-# scores.jsonl — one record per line, original fields + score columns:
-#   factcc_score        float [0,1]  probability of CORRECT class
-#   fenice_score        float [0,1]  fraction of claims entailed
-#   minicheck_score     float [0,1]  mean sentence support probability
-#   minicheck_pred      int   0/1    aggregate binary prediction
-#   alignscore_score    float [0,1]  alignment score
-#   qafacteval_score    float [0,1]  normalised LERC-QUIP score
-#   qafacteval_raw_score float       raw QAFactEval score
-
-# scores.summary.tsv — tab-separated mean scores per metric:
-#   metric  mean_score  count  n_nan
+The repository also contains experimental SFT/GRPO scripts. Their environment
+and command details are in `GRPO_EXPERIMENT.md`; `requirements-grpo.txt` is a
+provisioning target for IT, not permission to install packages on the company
+machine. Training still requires its base model/checkpoint and an approved
+TRL/PEFT/PyTorch stack.

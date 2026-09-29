@@ -12,8 +12,8 @@ class BaseEvaluator(abc.ABC):
     Each subclass wraps one metric (FactCC, FENICE, MiniCheck, …).
     All evaluators follow the same contract:
 
-    * ``__init__`` accepts at least ``device`` (str) and ``model_path``
-      (optional local path override, for offline environments).
+    * ``__init__`` accepts ``device`` (str) and metric-specific local model
+      options where the upstream implementation supports them.
     * ``load()`` loads the model/tokenizer into memory (called lazily).
     * ``evaluate(records, source_col, summary_col)`` returns a list of
       dicts, one per record, containing the original record fields plus
@@ -21,9 +21,8 @@ class BaseEvaluator(abc.ABC):
 
     Notes
     -----
-    ``model_path`` should always be respected over any default HuggingFace
-    hub identifier so that the pipeline works fully offline (e.g. on a
-    company cluster with no internet access).
+    Checkpoint handling differs by metric: some accept a direct local path,
+    some use a Hugging Face cache, and some require a fixed directory layout.
     """
 
     #: Short name used for the output column, e.g. "factcc"
@@ -71,9 +70,8 @@ class BaseEvaluator(abc.ABC):
         Returns
         -------
         list[dict]
-            Each dict is the original record + ``{metric_name}_score`` (float,
-            0–1 range where higher = more faithful) and any metric-specific
-            extra fields.
+            Each dict is the original record + ``{metric_name}_score`` (float
+            on that metric's native scale) and any metric-specific extra fields.
         """
         if not self._loaded:
             self.load()

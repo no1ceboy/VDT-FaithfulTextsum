@@ -1,241 +1,69 @@
 # VDT-FaithfulTextsum
 
-**Faithful Text Summarization Evaluation on Vietnamese Documents**
+This repository evaluates factual consistency in summaries and includes an experimental Vietnamese SFT/GRPO research scaffold. It is not a validated production training recipe. Start by comparing a human summary and one or more model summaries against the same source document; see [GRPO_EXPERIMENT.md](GRPO_EXPERIMENT.md) before using automatic metrics as training rewards.
 
-This repository provides an evaluation pipeline for assessing the **factual faithfulness** of abstractive summaries produced on Vietnamese text. It wraps five state-of-the-art metrics into a unified CLI that can run on a full dataset in a single command.
+## Input data
 
----
-
-## Metrics
-
-| Metric | Approach | Model (default) | Reference |
-|---|---|---|---|
-| **FactCC** | NLI classification | `manueldeprada/FactCC` | Kryscinski et al., 2020 |
-| **FENICE** | Claim extraction + NLI | `roberta-large-mnli` | Scirè et al., 2024 |
-| **MiniCheck** | Sentence fact-checking | `Bespoke-MiniCheck-7B` | Tang et al., 2024 |
-| **AlignScore** | Unified alignment function | `AlignScore-large` | Zha et al., 2023 |
-| **QAFactEval** | QA-based | LERC-QUIP models | Fabbri et al., 2022 |
-
-> **Note on Vietnamese:** All metrics were originally developed for English. They will still produce numeric scores on Vietnamese text, but calibration may vary. FENICE and AlignScore use English NLI/coreference models and will emit a warning.
-
----
-
-## Dataset Format
-
-Each record in the input dataset is a JSON object (JSONL file, one record per line):
+Use JSONL with one record per document. Keep the original source and summaries in separate fields:
 
 ```json
-{
-  "id": "7",
-  "style": "daily",
-  "input": "<source document>",
-  "abstract_sum": "<human summary>",
-  "domain": "tư tưởng",
-  "token_length": 1135,
-  "level": 3
-}
+{"id":"7","input":"source document text","human_sum":"human summary","llm_sum":"LLM summary"}
 ```
 
-| Field | Description |
+`input` is the grounding document. Source-based factuality metrics score each summary against it. ROUGE and BERTScore instead compare generated summaries to `human_sum`; the human summary is not assumed to be factually perfect.
+
+## Local models and offline runs
+
+Transfer model files to the company machine before running. The required layout depends on the metric:
+
+| Metric | Local model files expected |
 |---|---|
-| `input` | Source document (used as the grounding/context for all metrics) |
-| `abstract_sum` | Summary to evaluate (default). Can be any column via `--summary_col`. |
+| FactCC | A local Transformers checkpoint under `models/factcc`, passed with `--factcc_model_path models/factcc` |
+| MiniCheck | Complete extracted model folder `models/minicheck/`, passed with `--minicheck_model_path` |
+| AlignScore | `models/alignscore/AlignScore-large.ckpt` passed with `--alignscore_ckpt`; a local RoBERTa config/tokenizer folder at `models/roberta-large/` passed with `--alignscore_backbone_path`; plus NLTK `punkt_tab` data |
+| FENICE | `Babelscape/t5-base-summarization-claim-extractor` and `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` in the Hugging Face cache; upstream FENICE uses fixed model IDs and has no direct checkpoint-path option |
+| QAFactEval | The directory tree produced by its upstream `download_models.sh`, passed with `--qafacteval_model_path` |
+| BERTScore | A complete local encoder/tokenizer folder passed with `--bertscore_model_path`; for Vietnamese, start with `bert-base-multilingual-cased` and layer 9 |
 
-Future summary columns (e.g. `llm_sum` for LLM-generated summaries) are supported via the `--summary_col` flag without code changes.
+ROUGE-1, ROUGE-2, and ROUGE-L are included as a small standard-library implementation. BERTScore uses the existing PyTorch/Transformers stack directly, so it does not require installing the separate `bert-score` package; it does require transferring the full encoder/tokenizer checkpoint. Its output is raw, unrescaled precision/recall/F1 with uniform token weights, and may differ slightly from the upstream `bert-score` package. Record the checkpoint and layer with results.
 
----
+Keep locally extracted checkpoints in `models/` inside the repository (this directory is ignored by Git and is not included in the code ZIP). Preferred layout: `models/factcc/` for FactCC, `models/minicheck/` for MiniCheck, `models/alignscore/AlignScore-large.ckpt` for AlignScore, and `models/roberta-large/` for the RoBERTa tokenizer/config files AlignScore needs. The AlignScore checkpoint already contains trained RoBERTa weights, so the `roberta-large` folder does not need a second set of weights. Pass these local folders directly to the CLI; this avoids Hub cache-layout ambiguity. Alternatively, a complete Hugging Face cache can be placed at `models/hf-cache/` and passed with `--hf_cache_dir`. Both metrics use NLTK sentence splitting. If approved, put NLTK data outside `src/`, at `models/nltk_data/tokenizers/punkt_tab/english/...`. Pass `--nltk_data_dir models/nltk_data`—the parent of `tokenizers`. The bundle does not redistribute NLTK data because the [NLTK data license inventory](https://github.com/nltk/nltk_data/blob/gh-pages/DATASET-LICENSES.md) currently lists it without a declared license. `--offline` makes missing model files fail locally instead of downloading.
 
-## Installation
+The included MiniCheck FLAN-T5 adapter and AlignScore adapter can run together. They no longer import their upstream Python packages and use the shared PyTorch/Transformers stack. These are inference-only ports and should be score-checked against upstream before treating results as interchangeable. NLTK and its approved `punkt_tab` resource are still needed for sentence splitting. ROUGE and BERTScore compare a candidate summary to `human_sum`, not to the input document; the human-reference row is left null to avoid a misleading self-match of 1.0. FENICE pins Transformers ~=4.38.2 while this project targets >=4.56.2, and its upstream repository is CC BY-NC-SA 4.0, so obtain company licensing/compliance approval before using it for company work. QAFactEval has a legacy dependency/model stack; use an IT-provisioned compatible environment if it conflicts with the main one, then combine outputs by record ID.
 
-### 1. Clone and enter the repo
-```bash
-git clone <this-repo>
-cd VDT-FaithfulTextsum
+## Package layout and CLI
+
+Reusable code lives in `src/evaluate/` and `src/training/`. From the repository root, launch evaluation with `python -m src.evaluate.run_eval`; no project installation or custom `PYTHONPATH` is needed. The `scripts/run_eval.py` file remains a convenience wrapper. Running from source does not require installing this project.
+
+`VDT-FaithfulTextsum-repo-v3.zip` contains the complete project source, tests, sample data, documentation, and dependency manifests. It does not include Python, installed packages, model weights, NLTK data, or private/ignored datasets. Extract your separate model archives into `models/` under the extracted repository root. The optional SFT/GRPO code also requires an IT-provisioned training environment; see `GRPO_EXPERIMENT.md`. Do not install packages on the company machine unless IT approves it.
+
+## Run a paired baseline
+
+From the extracted repository root, with the approved Python environment active and model files already extracted under `models/`:
+
+```text
+python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --factcc_model_path models/factcc --minicheck_model_path models/minicheck --alignscore_ckpt models/alignscore/AlignScore-large.ckpt --alignscore_backbone_path models/roberta-large --nltk_data_dir models/nltk_data --offline --batch_size 2 --limit 10 --output results/smoke.jsonl
 ```
 
-### 2. Install dependencies
-```bash
-# Install all metrics:
-bash scripts/install_deps.sh
+If you have only a standard Hugging Face cache rather than extracted model folders, omit `--minicheck_model_path` and `--alignscore_backbone_path`, then pass `--hf_cache_dir models/hf-cache`; the cache must contain complete snapshots for `lytang/MiniCheck-Flan-T5-Large` and `roberta-large`. The AlignScore path points to the `.ckpt` file itself. The command adds separate score fields; `llm_sum__rouge_score` is ROUGE-L F1. ROUGE needs no checkpoint. BERTScore is not included until its separate model checkpoint has been uploaded; to enable it, extract a complete multilingual BERT folder to `models/bert-base-multilingual-cased`, add `bertscore` to `--metrics`, and add `--bertscore_model_path models/bert-base-multilingual-cased`. The human summary has null ROUGE/BERTScore values because it is the reference. The `.summary.tsv` reports each summary-column/metric mean and valid count.
 
-# Or install individual metrics:
-bash scripts/install_deps.sh --factcc
-bash scripts/install_deps.sh --fenice
-bash scripts/install_deps.sh --minicheck
-bash scripts/install_deps.sh --alignscore
-bash scripts/install_deps.sh --qafacteval
-```
+Inspect the small-slice results, then rerun the same command without `--limit 10` for the full dataset. The CLI accepts `--summary_col` for a single summary field; `--summary_cols` evaluates several fields in one run while loading each metric once.
 
-### 3. Offline / cluster use (no internet)
-On a machine with internet, pre-download models:
-```bash
-# FactCC
-python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
-           AutoTokenizer.from_pretrained('manueldeprada/FactCC'); \
-           AutoModelForSequenceClassification.from_pretrained('manueldeprada/FactCC')"
+## Reading the scores
 
-# MiniCheck (Bespoke-MiniCheck-7B)
-python -c "from minicheck.minicheck import MiniCheck; MiniCheck('Bespoke-MiniCheck-7B')"
+The source-based factuality models were developed mainly for English. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific. Treat Vietnamese scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness.
 
-# AlignScore-large
-python -c "from huggingface_hub import hf_hub_download; \
-           hf_hub_download('yzha/AlignScore', 'AlignScore-large.ckpt', local_dir='./models/alignscore')"
+The source-based metrics measure factual support; ROUGE and BERTScore instead measure similarity to the human reference. None alone establish factual faithfulness, coverage, relevance, readability, or whether important details were omitted. These scores are exploratory on Vietnamese; validate them against human labels before drawing research conclusions.
 
-# QAFactEval — run the provided download script in the cloned repo
-bash /tmp/QAFactEval_install/download_models.sh
-```
+## Experimental training
 
-Then transfer model files to the cluster and use `--*_model_path` flags (see below).
+The optional [SFT + GRPO pilot](GRPO_EXPERIMENT.md) uses the human summary only as a separate training target/reward reference; it is never included in the generation prompt. It creates source-grouped train/validation/test splits, uses local-only model paths, and writes run manifests. The training stack is separate from the baseline evaluator dependencies; the company environment must be provisioned by IT. `requirements-grpo.txt` is a version target, not a ready-to-install lockfile. Do not run package installers on a restricted machine without IT approval.
 
----
+## Metric references
 
-## Usage
-
-### Run all metrics on the sample data
-```bash
-python evaluate/run_all.py \
-    --data data/sample.jsonl \
-    --output results/scores.jsonl
-```
-
-### Run specific metrics
-```bash
-python evaluate/run_all.py \
-    --data data/my_dataset.jsonl \
-    --metrics factcc minicheck alignscore \
-    --output results/scores.jsonl \
-    --device cuda
-```
-
-### Evaluate LLM-generated summaries
-```bash
-python evaluate/run_all.py \
-    --data data/with_llm_sums.jsonl \
-    --summary_col llm_sum \
-    --metrics minicheck alignscore \
-    --output results/llm_scores.jsonl
-```
-
-### Offline mode (all models from local paths)
-```bash
-python evaluate/run_all.py \
-    --data data/my_dataset.jsonl \
-    --offline \
-    --metrics factcc minicheck alignscore qafacteval \
-    --factcc_model_path /mnt/models/factcc \
-    --minicheck_model_path /mnt/models/Bespoke-MiniCheck-7B \
-    --alignscore_ckpt /mnt/models/alignscore/AlignScore-large.ckpt \
-    --qafacteval_model_path /mnt/models/qafacteval \
-    --output results/scores.jsonl \
-    --device cuda
-```
-
-### All CLI arguments
-```
-python evaluate/run_all.py --help
-```
-
-| Argument | Default | Description |
-|---|---|---|
-| `--data` | *(required)* | Input dataset (.jsonl or .json) |
-| `--source_col` | `input` | Field containing the source document |
-| `--summary_col` | `abstract_sum` | Field containing the summary to evaluate |
-| `--metrics` | all | Space-separated list of metrics to run |
-| `--output` | `results/scores.jsonl` | Output JSONL path |
-| `--device` | `cuda` | PyTorch device string |
-| `--batch_size` | `8` | Default batch size |
-| `--limit` | None | Evaluate only the first N records |
-| `--offline` | False | Set HF offline env vars |
-| `--factcc_model_path` | None | Local path for FactCC |
-| `--fenice_model_path` | None | Local NLI model path for FENICE |
-| `--minicheck_model_path` | None | Local path for MiniCheck |
-| `--minicheck_model_name` | `Bespoke-MiniCheck-7B` | MiniCheck model name |
-| `--alignscore_ckpt` | None | Local .ckpt path for AlignScore |
-| `--alignscore_mode` | `nli_sp` | AlignScore evaluation mode |
-| `--qafacteval_model_path` | None | Local model folder for QAFactEval |
-
----
-
-## Output Format
-
-Each output record preserves all original fields and adds:
-
-| Field | Type | Description |
-|---|---|---|
-| `factcc_score` | float [0,1] | Probability of CORRECT class |
-| `fenice_score` | float [0,1] | FENICE factuality score |
-| `minicheck_score` | float [0,1] | Mean sentence support probability |
-| `minicheck_pred` | int 0/1 | MiniCheck aggregate prediction |
-| `alignscore_score` | float [0,1] | AlignScore alignment score |
-| `qafacteval_score` | float [0,1] | QAFactEval normalised score |
-| `qafacteval_raw_score` | float | Raw QAFactEval score |
-
-A `.summary.tsv` file is also written alongside the output JSONL with per-metric mean scores.
-
----
-
-## Project Structure
-
-```
-VDT-FaithfulTextsum/
-├── src/
-│   ├── evaluate/               # Faithfulness metric library
-│   │   ├── __init__.py
-│   │   ├── base.py             # Abstract BaseEvaluator class
-│   │   ├── factcc_eval.py      # FactCC wrapper
-│   │   ├── fenice_eval.py      # FENICE wrapper
-│   │   ├── minicheck_eval.py   # MiniCheck wrapper
-│   │   ├── alignscore_eval.py  # AlignScore wrapper
-│   │   └── qafacteval_eval.py  # QAFactEval wrapper
-│   └── train/                  # Future: model training code
-│       └── __init__.py
-├── scripts/
-│   ├── run_eval.py             # Evaluation CLI entry point
-│   └── install_deps.sh         # Selective dependency installer
-├── configs/                    # Future: YAML/JSON experiment configs
-├── data/
-│   └── sample.jsonl            # 1-record sample for smoke tests
-├── results/                    # Evaluation outputs (gitignored)
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
----
-
-## Citation
-
-If you use this pipeline, please cite the individual metrics:
-
-```bibtex
-@inproceedings{kryscinski2020evaluating,
-  title={Evaluating the Factual Consistency of Abstractive Text Summarization},
-  author={Kryscinski, Wojciech and McCann, Bryan and Xiong, Caiming and Socher, Richard},
-  booktitle={EMNLP},
-  year={2020}
-}
-@inproceedings{scire2024fenice,
-  title={FENICE: Factuality Evaluation of summarization based on Natural language Inference and Claim Extraction},
-  author={Scir{\`e}, Alessandro and others},
-  booktitle={ACL Findings},
-  year={2024}
-}
-@article{tang2024minicheck,
-  title={MiniCheck: Efficient Fact-Checking of LLMs on Grounding Documents},
-  author={Tang, Liyan and others},
-  journal={arXiv},
-  year={2024}
-}
-@inproceedings{zha2023alignscore,
-  title={AlignScore: Evaluating Factual Consistency with a Unified Alignment Function},
-  author={Zha, Yuheng and others},
-  booktitle={ACL},
-  year={2023}
-}
-@inproceedings{fabbri2022qafacteval,
-  title={QAFactEval: Improved QA-Based Factual Consistency Evaluation for Summarization},
-  author={Fabbri, Alexander R and others},
-  booktitle={NAACL},
-  year={2022}
-}
-```
+- FactCC: Kryscinski et al., 2020, “Evaluating the Factual Consistency of Abstractive Text Summarization”
+- FENICE: Scirè et al., 2024, [official repository](https://github.com/Babelscape/FENICE)
+- MiniCheck: Tang et al., 2024, [official repository](https://github.com/Liyan06/MiniCheck)
+- AlignScore: Zha et al., 2023, [official repository](https://github.com/yuh-zha/AlignScore)
+- QAFactEval: Fabbri et al., 2022, [official repository](https://github.com/salesforce/QAFactEval)
+- BERTScore: Zhang et al., 2020, [official implementation](https://github.com/Tiiiger/bert_score)

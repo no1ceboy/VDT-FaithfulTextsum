@@ -1,6 +1,4 @@
-"""AlignScore evaluator.
-
-Wraps ``alignscore`` for information-alignment-based faithfulness scoring.
+"""AlignScore evaluator using the project's inference-only compatibility port.
 
 Default checkpoint: ``AlignScore-large`` (best quality).
 Lighter alternative: ``AlignScore-base``.
@@ -16,7 +14,7 @@ References
 ----------
 * Zha et al., 2023 — "AlignScore: Evaluating Factual Consistency with a
   Unified Alignment Function"
-* https://github.com/yuh-zha/AlignScore
+* https://github.com/yuh-zha/AlignScore (MIT; inference implementation adapted locally)
 """
 
 from __future__ import annotations
@@ -30,8 +28,7 @@ from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
 
-# Default HuggingFace checkpoint identifier (used if model_path is None)
-_DEFAULT_CKPT = "yzha/AlignScore"
+_DEFAULT_REPO = "yzha/AlignScore"
 _DEFAULT_CKPT_FILE = "AlignScore-large.ckpt"
 
 
@@ -44,46 +41,48 @@ class AlignScoreEvaluator(BaseEvaluator):
         self,
         device: str = "cuda",
         model_path: str | None = None,
+        backbone_path: str | None = None,
+        cache_dir: str | None = None,
         batch_size: int = 8,
         evaluation_mode: str = "nli_sp",  # "nli_sp" | "nli" | "bin_sp" | "bin"
     ) -> None:
         super().__init__(device=device, model_path=model_path, batch_size=batch_size)
         self.evaluation_mode = evaluation_mode
-        # If model_path is given it must point to a local .ckpt file.
-        self._ckpt_path = model_path  # None → AlignScore will auto-download
+        self._backbone_path = backbone_path
+        self._cache_dir = cache_dir
+        # If omitted, resolve the checkpoint through the HF cache (supports
+        # HF_HUB_OFFLINE when the file has already been transferred).
+        self._ckpt_path = model_path
         self._scorer = None
 
     # ------------------------------------------------------------------
 
     def _load(self) -> None:
-        try:
-            from alignscore import AlignScore  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "AlignScore is not installed. Run:\n"
-                "  git clone https://github.com/yuh-zha/AlignScore && "
-                "cd AlignScore && pip install ."
-            ) from exc
+        from ._alignscore_compat import AlignScoreCompatScorer
 
         logger.info(
             "Loading AlignScore (ckpt=%s, mode=%s) …",
-            self._ckpt_path or _DEFAULT_CKPT,
+            self._ckpt_path or f"{_DEFAULT_REPO}/{_DEFAULT_CKPT_FILE}",
             self.evaluation_mode,
         )
 
-        kwargs: dict[str, Any] = dict(
-            model="roberta-large",
+        checkpoint_path = self._ckpt_path
+        if checkpoint_path is None:
+            from huggingface_hub import hf_hub_download
+
+            checkpoint_path = hf_hub_download(
+                repo_id=_DEFAULT_REPO,
+                filename=_DEFAULT_CKPT_FILE,
+            )
+
+        self._scorer = AlignScoreCompatScorer(
+            ckpt_path=checkpoint_path,
+            model=self._backbone_path or "roberta-large",
+            cache_dir=self._cache_dir,
             batch_size=self.batch_size,
             device=self.device,
             evaluation_mode=self.evaluation_mode,
         )
-        if self._ckpt_path:
-            kwargs["ckpt_path"] = self._ckpt_path
-        else:
-            # Let AlignScore download the default checkpoint
-            kwargs["ckpt_path"] = _DEFAULT_CKPT_FILE
-
-        self._scorer = AlignScore(**kwargs)
 
     # ------------------------------------------------------------------
 
@@ -97,12 +96,10 @@ class AlignScoreEvaluator(BaseEvaluator):
         summaries = [r[summary_col] for r in records]
 
         logger.info("Running AlignScore on %d records …", len(records))
-        try:
-            # AlignScore.score() processes in internal batches
-            scores = self._scorer.score(contexts=sources, claims=summaries)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("AlignScore failed: %s", exc)
-            scores = [float("nan")] * len(records)
+        # AlignScore.score() processes in internal batches.
+        scores = self._scorer.score(contexts=sources, claims=summaries)
+        if len(scores) != len(records):
+            raise RuntimeError("AlignScore returned an unexpected number of scores")
 
         results: list[dict[str, Any]] = []
         for record, score in tqdm(

@@ -1,26 +1,18 @@
-"""MiniCheck evaluator.
+"""MiniCheck evaluator using the project's bundled FLAN-T5 inference port.
 
-Wraps the ``MiniCheck`` library for sentence-level fact-checking.
+MiniCheck scores individual claims against source documents. This adapter
+splits each summary into sentence-like claims, averages their support
+probabilities, and preserves the individual probabilities in the output.
 
-Default model: ``Bespoke-MiniCheck-7B`` (best quality, requires GPU).
-Lighter alternative: ``MiniCheck-Flan-T5-Large`` (CPU-feasible).
-
-Offline usage: pass ``model_path`` pointing to a local directory or set
-``HF_HUB_OFFLINE=1`` after pre-downloading the checkpoint.
-
-The score returned is the *mean support probability* over all sentences
-in the summary (1.0 = all sentences supported; 0.0 = none supported).
-
-References
-----------
-* Tang et al., 2024 — "MiniCheck: Efficient Fact-Checking of LLMs on
-  Grounding Documents"
-* https://github.com/Liyan06/MiniCheck
+For offline use, provide a Hugging Face cache directory and set
+``HF_HUB_OFFLINE=1``. The bundled adapter currently supports the upstream
+``flan-t5-large`` model only; its weights remain a separate model asset.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from tqdm import tqdm
@@ -29,44 +21,41 @@ from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "Bespoke-MiniCheck-7B"
+_DEFAULT_MODEL = "flan-t5-large"
 
 
 class MiniCheckEvaluator(BaseEvaluator):
-    """Wrapper around MiniCheck sentence-level fact-checker."""
+    """Wrapper around MiniCheck sentence-level fact checking."""
 
     metric_name = "minicheck"
 
     def __init__(
         self,
         device: str = "cuda",
-        model_path: str | None = None,
         batch_size: int = 16,
         model_name: str = _DEFAULT_MODEL,
+        model_path: str | None = None,
+        cache_dir: str | None = None,
+        chunk_size: int | None = None,
     ) -> None:
-        super().__init__(device=device, model_path=model_path, batch_size=batch_size)
-        # model_path takes priority over model_name
-        self.model_name = model_path or model_name
+        super().__init__(device=device, batch_size=batch_size)
+        self.model_path = model_path
+        self.cache_dir = cache_dir
+        self.model_name = model_name
+        self.chunk_size = chunk_size
         self._checker = None
 
-    # ------------------------------------------------------------------
-
     def _load(self) -> None:
-        try:
-            from minicheck.minicheck import MiniCheck  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "MiniCheck is not installed. Run:\n"
-                '  pip install "minicheck @ git+https://github.com/Liyan06/MiniCheck.git@main"'
-            ) from exc
+        from ._minicheck_compat import MiniCheckCompatScorer
 
         logger.info("Loading MiniCheck model: %s …", self.model_name)
-        self._checker = MiniCheck(
+        self._checker = MiniCheckCompatScorer(
             model_name=self.model_name,
+            model_path=self.model_path,
+            batch_size=self.batch_size,
+            cache_dir=self.cache_dir,
             device=self.device,
         )
-
-    # ------------------------------------------------------------------
 
     def _evaluate(
         self,
@@ -74,35 +63,37 @@ class MiniCheckEvaluator(BaseEvaluator):
         source_col: str,
         summary_col: str,
     ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
+        results = [dict(record) for record in records]
+        docs: list[str] = []
+        claims: list[str] = []
+        claim_record_ids: list[int] = []
+        for record_id, record in enumerate(records):
+            pieces = [
+                part.strip()
+                for part in re.split(r"(?<=[.!?])\s+|[\r\n]+", str(record[summary_col]))
+                if part.strip()
+            ]
+            for claim in pieces:
+                docs.append(str(record[source_col]))
+                claims.append(claim)
+                claim_record_ids.append(record_id)
 
-        for i in tqdm(
-            range(0, len(records), self.batch_size),
-            desc="MiniCheck",
-            unit="batch",
-        ):
-            batch = records[i : i + self.batch_size]
-            docs = [r[source_col] for r in batch]
-            claims = [r[summary_col] for r in batch]
+        per_record_scores: list[list[float]] = [[] for _ in records]
+        for start in tqdm(range(0, len(claims), self.batch_size), desc="MiniCheck", unit="batch"):
+            end = min(start + self.batch_size, len(claims))
+            kwargs: dict[str, Any] = {"docs": docs[start:end], "claims": claims[start:end]}
+            # In MiniCheck, chunk_size controls source-document chunk length.
+            if self.chunk_size is not None:
+                kwargs["chunk_size"] = self.chunk_size
+            _, support_probs, _, _ = self._checker.score(**kwargs)
+            if len(support_probs) != end - start:
+                raise RuntimeError("MiniCheck returned an unexpected number of claim scores")
+            for record_id, probability in zip(claim_record_ids[start:end], support_probs):
+                per_record_scores[record_id].append(float(probability))
 
-            # MiniCheck.score() accepts parallel lists of docs and claims.
-            # It returns (pred_labels, raw_probs, sent_scores, agg_scores)
-            # where agg_scores is the aggregated per-document score.
-            try:
-                pred_labels, raw_probs, sent_scores, agg_scores = self._checker.score(
-                    docs=docs,
-                    claims=claims,
-                    chunk_size=self.batch_size,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error("MiniCheck batch %d failed: %s", i, exc)
-                agg_scores = [float("nan")] * len(batch)
-                pred_labels = [None] * len(batch)
-
-            for record, score, label in zip(batch, agg_scores, pred_labels):
-                out = dict(record)
-                out[f"{self.metric_name}_score"] = round(float(score), 6) if score == score else float("nan")
-                out[f"{self.metric_name}_pred"] = label  # 1 = supported, 0 = not
-                results.append(out)
-
+        for out, scores in zip(results, per_record_scores):
+            score = sum(scores) / len(scores) if scores else float("nan")
+            out[f"{self.metric_name}_score"] = round(score, 6) if score == score else score
+            out[f"{self.metric_name}_pred"] = int(all(value >= 0.5 for value in scores)) if scores else None
+            out[f"{self.metric_name}_sentence_scores"] = [round(value, 6) for value in scores]
         return results

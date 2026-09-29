@@ -17,6 +17,7 @@ References
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -54,9 +55,12 @@ class FactCCEvaluator(BaseEvaluator):
 
     def _load(self) -> None:
         logger.info("Loading FactCC from %s …", self._model_id)
-        self._tokenizer = AutoTokenizer.from_pretrained(self._model_id)
+        local_files_only = Path(self._model_id).expanduser().is_dir()
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self._model_id, local_files_only=local_files_only
+        )
         self._model = AutoModelForSequenceClassification.from_pretrained(
-            self._model_id
+            self._model_id, local_files_only=local_files_only
         )
         self._model.to(self.device)
         self._model.eval()
