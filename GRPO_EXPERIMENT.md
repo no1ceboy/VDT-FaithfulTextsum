@@ -25,10 +25,10 @@ The initial settings are conservative for a busy GPU: one sequence per device, f
 
 ## Data contract and leakage controls
 
-Input is UTF-8 JSONL, one object per line. By default the source is `input`, the human reference is `abstract_sum`, and `id` is used for traceability. `style` is optional. The preparer validates text and IDs, creates a Vietnamese chat prompt, and stores the reference in a separate `reference` field for reward computation. Prompt construction and the trainer both keep `reference` out of the prompt. The split groups normalized exact duplicate source documents together so they cannot cross train/validation/test.
+Input is UTF-8 JSONL, one object per line. By default the source is `input`, the human reference is `human_sum`, and `id` is used for traceability. `llm_sum` is an optional existing system output for baseline evaluation; it is not treated as the human target. `style` is optional. The preparer validates text and IDs, creates a Vietnamese chat prompt, and stores the human reference in a separate `reference` field for reward computation. Prompt construction and the trainer both keep `reference` out of the prompt. The split groups normalized exact duplicate source documents together so they cannot cross train/validation/test. The included legacy sample uses `abstract_sum`, so pass `--reference_col abstract_sum` for that schema.
 
 ```json
-{"id":"7","style":"daily","input":"văn bản nguồn...","abstract_sum":"tóm tắt do con người viết..."}
+{"id":"7","style":"daily","input":"văn bản nguồn...","human_sum":"tóm tắt do con người viết...","llm_sum":"tóm tắt do mô hình tạo..."}
 ```
 
 Use enough distinct documents for all three splits. A one-record sample can only smoke-test parsing with both holdout fractions set to zero; it is not a training or evaluation dataset. The deterministic split is not stratified. For a research study, inspect the split counts and balance domains/styles manually before training.
@@ -37,19 +37,19 @@ Use enough distinct documents for all three splits. A one-record sample can only
 
 Run commands from the repository root. Paths below are examples; on the company machine use the already provisioned environment and local paths. None of these commands installs software.
 
-### 1. Prepare data
+### 1. Prepare and combine data
 
 ```bash
 python scripts/prepare_grpo_data.py \
-  --input /data/vdt/summaries.jsonl \
+  --input /data/vdt/summaries_part1.jsonl /data/vdt/summaries_part2.jsonl \
   --output_dir /data/vdt/grpo_splits \
-  --source_col input --reference_col abstract_sum \
+  --source_col input --reference_col human_sum \
   --validation_fraction 0.1 --test_fraction 0.1 --seed 42
 ```
 
-Review `data_manifest.json`, row counts, duplicate-source grouping, and several examples in `train.jsonl`, `validation.jsonl`, and `test.jsonl`. The `--overwrite` switch replaces these named outputs; otherwise the script refuses to overwrite them.
+Pass one or more same-schema JSONL paths after `--input`; the preparer validates and combines them, namespaces IDs by input file, then performs one grouped split across the combined corpus. Review `data_manifest.json`, row counts, duplicate-source grouping, and examples in `train.jsonl`, `validation.jsonl`, and `test.jsonl`. Only `train.jsonl` is for training; held-out records intentionally remain outside it. The `--overwrite` switch replaces these named outputs; otherwise the script refuses to overwrite them.
 
-For a parser-only smoke test on the included single-record sample, use `--validation_fraction 0 --test_fraction 0` and an output directory outside the project. Do not train or report evaluation from that one record. As a rough pilot heuristic, treat fewer than 100 training rows as a pipeline/sensitivity exercise rather than evidence of generalization; source diversity matters more than the raw count.
+For a parser-only smoke test on the included legacy single-record sample, use `--reference_col abstract_sum --validation_fraction 0 --test_fraction 0` and an output directory outside the project. Do not train or report evaluation from that one record. As a rough pilot heuristic, treat fewer than 100 training rows as a pipeline/sensitivity exercise rather than evidence of generalization; source diversity matters more than the raw count.
 
 ### 2. Optional SFT warm-start
 
@@ -82,7 +82,7 @@ python scripts/train_grpo.py \
   --reward_device cpu --seed 42
 ```
 
-For a base-model start, pass the base checkpoint as `--model` and omit `--base_model`. For FactCC, select `factcc` and provide `--factcc_model_path`. For AlignScore, select `alignscore`, provide `--alignscore_ckpt`, and pass `--hf_cache_dir` pointing to the cache containing `roberta-large`. Keep those checkpoint/cache folders in the same local layout used by the existing evaluation commands.
+For a base-model start, pass the base checkpoint as `--model` and omit `--base_model`. For FactCC, select `factcc` and provide `--factcc_model_path`. For AlignScore, select `alignscore` and use the default local pair `models/alignscore/AlignScore-base.ckpt` plus `models/roberta-base/`; override `--alignscore_ckpt` and `--alignscore_backbone_path` only when those files are stored elsewhere. MiniCheck uses `--hf_cache_dir` for its own cache/model folder.
 
 The script fails early for missing local paths, an empty training set, prompts longer than the configured cap, context overflow, or a GPU without BF16. It does not crop source text silently. The GRPO run writes `run_manifest.json`, Trainer checkpoints/logs, and a final LoRA adapter. The manifest records data hash, key hyperparameters, metric/reward weights and runtime choices. The generation script also writes a sidecar manifest with input/output hashes and decoding settings. Treat run directories and generated JSONL as sensitive: they contain source text and summaries. Completion logging is disabled by default.
 
@@ -110,7 +110,8 @@ python -m src.evaluate.run_eval \
   --summary_cols human_sum base_sum grpo_sum \
   --metrics factcc minicheck alignscore \
   --factcc_model_path models/factcc \
-  --alignscore_ckpt models/alignscore/AlignScore-large.ckpt \
+  --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
+  --alignscore_backbone_path models/roberta-base \
   --hf_cache_dir models/hf-cache \
   --nltk_data_dir models/nltk_data \
   --offline --batch_size 2 \

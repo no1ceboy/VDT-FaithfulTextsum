@@ -83,6 +83,7 @@ def make_metric_reward(
     factcc_model_path: str | None = None,
     hf_cache_dir: str | None = None,
     alignscore_ckpt: str | None = None,
+    alignscore_backbone_path: str | None = None,
     batch_size: int = 4,
 ) -> Callable[..., list[float]]:
     """Create a lazy, local-only reward adapter backed by an existing evaluator."""
@@ -116,6 +117,7 @@ def make_metric_reward(
                 evaluator = AlignScoreEvaluator(
                     device=device,
                     model_path=alignscore_ckpt,
+                    backbone_path=alignscore_backbone_path,
                     batch_size=batch_size,
                 )
             else:

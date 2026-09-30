@@ -26,8 +26,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="New directory for adapter, checkpoints, and run manifest")
     parser.add_argument("--faithfulness_metrics", nargs="+", choices=("factcc", "minicheck", "alignscore"), required=True)
     parser.add_argument("--factcc_model_path", help="Local FactCC checkpoint directory")
-    parser.add_argument("--alignscore_ckpt", help="Local AlignScore .ckpt file")
-    parser.add_argument("--hf_cache_dir", help="Shared local Hugging Face cache for MiniCheck and AlignScore")
+    parser.add_argument(
+        "--alignscore_ckpt",
+        default="models/alignscore/AlignScore-base.ckpt",
+        help="Local AlignScore-base .ckpt file",
+    )
+    parser.add_argument(
+        "--alignscore_backbone_path",
+        default="models/roberta-base",
+        help="Local roberta-base model/tokenizer folder paired with AlignScore-base",
+    )
+    parser.add_argument("--hf_cache_dir", default="models/hf-cache", help="Local MiniCheck cache/model folder")
     parser.add_argument("--reward_device", default="cpu", help="Device for metric models (cpu recommended for GPU headroom)")
     parser.add_argument("--reference_weight", type=float, default=0.25)
     parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -89,16 +98,51 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     if len(args.faithfulness_metrics) > 1 and not args.allow_multiple_metrics:
         raise ValueError("Select one metric for the first run; pass --allow_multiple_metrics to acknowledge a multi-metric pilot")
     if "minicheck" in args.faithfulness_metrics:
-        if not args.hf_cache_dir or not Path(args.hf_cache_dir).expanduser().is_dir():
+        cache_path = Path(args.hf_cache_dir).expanduser()
+        if not cache_path.is_absolute():
+            cache_path = REPO_ROOT / cache_path
+        if not cache_path.is_dir():
             raise ValueError("MiniCheck requires --hf_cache_dir pointing to the local Hugging Face cache")
+        args.hf_cache_dir = str(cache_path.resolve())
     if "factcc" in args.faithfulness_metrics:
         if not Path(args.factcc_model_path).expanduser().is_dir():
             raise ValueError("--factcc_model_path must be an existing local model directory")
     if "alignscore" in args.faithfulness_metrics:
-        if not Path(args.alignscore_ckpt).expanduser().is_file():
-            raise ValueError("--alignscore_ckpt must be an existing local .ckpt file")
-        if not args.hf_cache_dir or not Path(args.hf_cache_dir).expanduser().is_dir():
-            raise ValueError("AlignScore requires --hf_cache_dir pointing to the local roberta-large cache")
+        checkpoint_path = Path(args.alignscore_ckpt).expanduser()
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = REPO_ROOT / checkpoint_path
+        if not checkpoint_path.is_file():
+            raise ValueError(f"AlignScore checkpoint does not exist: {checkpoint_path}")
+        backbone_path = Path(args.alignscore_backbone_path).expanduser()
+        if not backbone_path.is_absolute():
+            backbone_path = REPO_ROOT / backbone_path
+        if not backbone_path.is_dir():
+            raise ValueError(f"Local roberta-base folder does not exist: {backbone_path}")
+        required_assets = ("config.json",)
+        missing_assets = [name for name in required_assets if not (backbone_path / name).is_file()]
+        has_weights = any(
+            (backbone_path / name).is_file()
+            for name in (
+                "model.safetensors",
+                "pytorch_model.bin",
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            )
+        )
+        has_tokenizer = (backbone_path / "tokenizer.json").is_file() or (
+            (backbone_path / "vocab.json").is_file() and (backbone_path / "merges.txt").is_file()
+        )
+        if not has_weights:
+            missing_assets.append("model.safetensors or pytorch_model.bin")
+        if not has_tokenizer:
+            missing_assets.append("tokenizer.json or vocab.json plus merges.txt")
+        if missing_assets:
+            raise ValueError(
+                f"Incomplete local roberta-base folder {backbone_path}; missing: "
+                + ", ".join(missing_assets)
+            )
+        args.alignscore_ckpt = str(checkpoint_path)
+        args.alignscore_backbone_path = str(backbone_path)
     return model_path, base_model_path, train_path, output_path
 
 
@@ -210,6 +254,7 @@ def main() -> int:
                 factcc_model_path=args.factcc_model_path,
                 hf_cache_dir=args.hf_cache_dir,
                 alignscore_ckpt=args.alignscore_ckpt,
+                alignscore_backbone_path=args.alignscore_backbone_path,
                 batch_size=4,
             )
             for metric in args.faithfulness_metrics
@@ -288,6 +333,9 @@ def main() -> int:
                 else None,
                 "alignscore_ckpt": str(Path(args.alignscore_ckpt).expanduser().resolve())
                 if args.alignscore_ckpt
+                else None,
+                "alignscore_backbone": str(Path(args.alignscore_backbone_path).expanduser().resolve())
+                if args.alignscore_backbone_path
                 else None,
             },
             "num_generations": args.num_generations,

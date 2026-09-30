@@ -14,7 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.training.grpo_data import (  # noqa: E402
     distinct_source_count,
-    read_records,
+    read_records_from_files,
     split_records,
     write_jsonl,
 )
@@ -22,19 +22,28 @@ from src.training.grpo_data import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, help="Input JSONL with source and human summary fields")
+    parser.add_argument(
+        "--input",
+        nargs="+",
+        required=True,
+        help="One or more same-schema JSONL files; combine them before splitting",
+    )
     parser.add_argument("--output_dir", required=True, help="New or existing directory for split files")
     parser.add_argument("--source_col", default="input")
-    parser.add_argument("--reference_col", default="abstract_sum")
+    parser.add_argument("--reference_col", default="human_sum")
     parser.add_argument("--id_col", default="id")
     parser.add_argument("--validation_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--overwrite", action="store_true", help="Allow replacing all three output files")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing existing split files and the manifest",
+    )
     args = parser.parse_args()
 
     try:
-        input_path = Path(args.input).resolve()
+        input_paths = [Path(path).resolve() for path in args.input]
         output_dir = Path(args.output_dir).resolve()
         train_path = output_dir / "train.jsonl"
         validation_path = output_dir / "validation.jsonl"
@@ -45,7 +54,9 @@ def main() -> int:
             existing = ", ".join(str(path) for path in targets if path.exists())
             raise FileExistsError(f"Refusing to overwrite existing output(s): {existing}; pass --overwrite to replace")
 
-        records = read_records(input_path, args.source_col, args.reference_col, args.id_col)
+        records = read_records_from_files(
+            input_paths, args.source_col, args.reference_col, args.id_col
+        )
         train, validation, test = split_records(
             records, args.validation_fraction, args.test_fraction, args.seed
         )
@@ -53,10 +64,20 @@ def main() -> int:
         write_jsonl(train_path, train, overwrite=args.overwrite)
         write_jsonl(validation_path, validation, overwrite=args.overwrite)
         write_jsonl(test_path, test, overwrite=args.overwrite)
-        digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+        input_file_hashes = [
+            {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in input_paths
+        ]
+        combined_digest = hashlib.sha256()
+        for item in input_file_hashes:
+            combined_digest.update(item["path"].encode("utf-8"))
+            combined_digest.update(b"\0")
+            combined_digest.update(item["sha256"].encode("ascii"))
         manifest = {
-            "input_file_name": input_path.name,
-            "input_sha256": digest,
+            "input_file_name": input_paths[0].name if len(input_paths) == 1 else None,
+            "input_files": input_file_hashes,
+            "input_sha256": combined_digest.hexdigest(),
+            "id_namespacing": "<input-order>:<filename>:<original-id>" if len(input_paths) > 1 else "preserved",
             "source_column": args.source_col,
             "reference_column": args.reference_col,
             "id_column": args.id_col,
@@ -75,7 +96,7 @@ def main() -> int:
         }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(
-            f"Validated {len(records)} rows; wrote train={len(train)}, validation={len(validation)}, "
+            f"Validated {len(records)} rows from {len(input_paths)} file(s); wrote train={len(train)}, validation={len(validation)}, "
             f"test={len(test)} to {output_dir}"
         )
         if not validation or not test:

@@ -23,38 +23,51 @@ from transformers import AutoTokenizer, RobertaConfig, RobertaModel
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_MODES = {"nli_sp", "nli", "bin_sp", "bin"}
-_MODEL_ID = "FacebookAI/roberta-large"
+_MODEL_ID = "roberta-base"
 
 
 def _load_backbone_assets(
     model_reference: str,
     cache_dir: str | Path | None,
     offline: bool,
-) -> tuple[Any, RobertaConfig]:
-    """Load RoBERTa tokenizer/config, accepting canonical and legacy cache IDs."""
-    cache_path = str(Path(cache_dir).expanduser().resolve()) if cache_dir is not None else None
-    model_ids = [model_reference]
-    if model_reference in {"FacebookAI/roberta-large", "roberta-large"}:
-        model_ids = ["FacebookAI/roberta-large", "roberta-large"]
+) -> tuple[Any, RobertaConfig, str]:
+    """Load tokenizer/config from an extracted backbone folder or Hub cache."""
+    local_path = Path(model_reference).expanduser()
+    if local_path.is_dir():
+        model_ids = [str(local_path.resolve())]
+        cache_path = None
+        local_files_only = True
+    else:
+        cache_path = str(Path(cache_dir).expanduser().resolve()) if cache_dir is not None else None
+        model_ids = [model_reference]
+        if model_reference in {"FacebookAI/roberta-base", "roberta-base"}:
+            model_ids = ["FacebookAI/roberta-base", "roberta-base"]
+        local_files_only = offline
 
     failures: list[OSError] = []
     for repo_id in model_ids:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, cache_dir=cache_path, local_files_only=offline
+                repo_id, cache_dir=cache_path, local_files_only=local_files_only
             )
             config = RobertaConfig.from_pretrained(
-                repo_id, cache_dir=cache_path, local_files_only=offline
+                repo_id, cache_dir=cache_path, local_files_only=local_files_only
             )
-            return tokenizer, config
+            return tokenizer, config, repo_id
         except OSError as exc:
             failures.append(exc)
 
-    if offline and cache_path:
+    if local_path.is_dir():
         raise FileNotFoundError(
-            "AlignScore could not find the RoBERTa tokenizer/config in the local Hugging Face "
-            f"cache at {cache_path}. The cache must preserve a complete snapshot for either "
-            "FacebookAI/roberta-large or the legacy roberta-large ID."
+            f"AlignScore could not load tokenizer/config files from local RoBERTa folder "
+            f"{local_path.resolve()}. Check that config.json and tokenizer files are present."
+        ) from failures[-1]
+    if (offline or local_path.is_absolute() or "/" in model_reference or "\\" in model_reference) and cache_path:
+        raise FileNotFoundError(
+            "AlignScore could not load RoBERTa tokenizer/config from "
+            f"{model_reference!r} or the local Hugging Face cache at {cache_path}. "
+            "Pass --alignscore_backbone_path pointing to the extracted roberta-base "
+            "folder, including config.json and tokenizer files."
         ) from failures[-1]
     raise failures[-1]
 
@@ -119,13 +132,30 @@ def _unwrap_state_dict(checkpoint: Any) -> Mapping[str, Tensor]:
 class _AlignScoreModel(nn.Module):
     """The upstream RoBERTa AlignScore heads without Lightning training code."""
 
-    def __init__(self, config: RobertaConfig) -> None:
+    def __init__(
+        self,
+        config: RobertaConfig,
+        backbone_reference: str,
+        cache_dir: str | Path | None,
+        offline: bool,
+    ) -> None:
         super().__init__()
-        # The AlignScore checkpoint contains the trained RoBERTa backbone.
-        # Build its architecture from the small config file, then load all
-        # inference weights from the checkpoint instead of downloading a
-        # second copy of the 1.4 GB base-model weights.
-        self.base_model = RobertaModel(config, add_pooling_layer=True)
+        # AlignScore is trained on top of a pretrained RoBERTa backbone. Load
+        # those assets first, then overlay any fine-tuned backbone tensors in
+        # the AlignScore checkpoint, matching the upstream loading sequence.
+        reference_path = Path(backbone_reference).expanduser()
+        is_local_path = reference_path.is_dir()
+        self.base_model = RobertaModel.from_pretrained(
+            backbone_reference,
+            config=config,
+            cache_dir=(
+                None
+                if is_local_path or cache_dir is None
+                else str(Path(cache_dir).expanduser().resolve())
+            ),
+            local_files_only=is_local_path or offline,
+            add_pooling_layer=True,
+        )
         hidden_size = self.base_model.config.hidden_size
         self.bin_layer = nn.Linear(hidden_size, 2)
         self.tri_layer = nn.Linear(hidden_size, 3)
@@ -167,7 +197,9 @@ class AlignScoreCompatScorer:
             or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         )
         hub_cache = str(Path(cache_dir).expanduser().resolve()) if cache_dir is not None else None
-        self.tokenizer, config = _load_backbone_assets(model, hub_cache, offline)
+        self.tokenizer, config, backbone_reference = _load_backbone_assets(
+            model, hub_cache, offline
+        )
         self.max_length = int(self.tokenizer.model_max_length)
         if self.max_length > 100_000:
             raise ValueError("Tokenizer has no finite model_max_length")
@@ -180,24 +212,30 @@ class AlignScoreCompatScorer:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         state_dict = _unwrap_state_dict(checkpoint)
 
-        scorer = _AlignScoreModel(config)
-        missing_keys, unexpected_keys = scorer.load_state_dict(state_dict, strict=False)
+        try:
+            scorer = _AlignScoreModel(config, backbone_reference, hub_cache, offline)
+        except OSError as exc:
+            raise FileNotFoundError(
+                "AlignScore could not load pretrained RoBERTa weights from "
+                f"{backbone_reference!r}. The matching roberta-base checkpoint must be "
+                "available locally; check --alignscore_backbone_path."
+            ) from exc
+        try:
+            missing_keys, unexpected_keys = scorer.load_state_dict(state_dict, strict=False)
+        except RuntimeError as exc:
+            raise ValueError(
+                "AlignScore checkpoint and RoBERTa backbone are incompatible. "
+                "Use AlignScore-base.ckpt with roberta-base, or AlignScore-large.ckpt "
+                "with roberta-large."
+            ) from exc
         missing_heads = [
             name for name in ("tri_layer.weight", "tri_layer.bias", "bin_layer.weight", "bin_layer.bias")
             if name in missing_keys
         ]
-        missing_backbone = [name for name in missing_keys if name.startswith("base_model.")]
         if missing_heads:
             raise ValueError(
                 "AlignScore checkpoint is missing required classification head weights: "
                 + ", ".join(missing_heads)
-            )
-        if missing_backbone:
-            preview = ", ".join(missing_backbone[:8])
-            suffix = " …" if len(missing_backbone) > 8 else ""
-            raise ValueError(
-                "AlignScore checkpoint is missing RoBERTa backbone weights; "
-                f"refusing random initialization ({preview}{suffix})"
             )
         if unexpected_keys:
             logger.info("Ignoring %d non-inference AlignScore checkpoint keys", len(unexpected_keys))

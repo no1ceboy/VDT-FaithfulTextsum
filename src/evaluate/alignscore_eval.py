@@ -1,14 +1,11 @@
 """AlignScore evaluator using the project's inference-only compatibility port.
 
-Default checkpoint: ``AlignScore-large`` (best quality).
-Lighter alternative: ``AlignScore-base``.
+Default checkpoint: ``AlignScore-base`` with the matching ``roberta-base`` model.
 
 Offline usage:
-  1. Pre-download the checkpoint:
-       huggingface-cli download yzha/AlignScore AlignScore-large.ckpt \\
-           --local-dir ./models/alignscore
-  2. Pass ``model_path="./models/alignscore/AlignScore-large.ckpt"``
-  3. Set ``HF_HUB_OFFLINE=1``, ``TRANSFORMERS_OFFLINE=1``
+  Pass the local AlignScore checkpoint and matching RoBERTa folder. The
+  repository CLI defaults to ``models/alignscore/AlignScore-base.ckpt`` and
+  ``models/roberta-base`` and never needs to download either asset.
 
 References
 ----------
@@ -20,6 +17,7 @@ References
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
@@ -28,8 +26,7 @@ from .base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_REPO = "yzha/AlignScore"
-_DEFAULT_CKPT_FILE = "AlignScore-large.ckpt"
+_DEFAULT_BACKBONE = str(Path(__file__).resolve().parents[2] / "models" / "roberta-base")
 
 
 class AlignScoreEvaluator(BaseEvaluator):
@@ -41,15 +38,15 @@ class AlignScoreEvaluator(BaseEvaluator):
         self,
         device: str = "cuda",
         model_path: str | None = None,
+        backbone_path: str | None = None,
         cache_dir: str | None = None,
         batch_size: int = 8,
         evaluation_mode: str = "nli_sp",  # "nli_sp" | "nli" | "bin_sp" | "bin"
     ) -> None:
         super().__init__(device=device, model_path=model_path, batch_size=batch_size)
         self.evaluation_mode = evaluation_mode
+        self.backbone_path = backbone_path or _DEFAULT_BACKBONE
         self._cache_dir = cache_dir
-        # If omitted, resolve the checkpoint through the HF cache (supports
-        # HF_HUB_OFFLINE when the file has already been transferred).
         self._ckpt_path = model_path
         self._scorer = None
 
@@ -60,21 +57,20 @@ class AlignScoreEvaluator(BaseEvaluator):
 
         logger.info(
             "Loading AlignScore (ckpt=%s, mode=%s) …",
-            self._ckpt_path or f"{_DEFAULT_REPO}/{_DEFAULT_CKPT_FILE}",
+            self._ckpt_path or "<missing local AlignScore checkpoint>",
             self.evaluation_mode,
         )
 
         checkpoint_path = self._ckpt_path
         if checkpoint_path is None:
-            from huggingface_hub import hf_hub_download
-
-            checkpoint_path = hf_hub_download(
-                repo_id=_DEFAULT_REPO,
-                filename=_DEFAULT_CKPT_FILE,
+            raise FileNotFoundError(
+                "AlignScore needs a local .ckpt file. Pass model_path or use "
+                "--alignscore_ckpt models/alignscore/AlignScore-base.ckpt."
             )
 
         self._scorer = AlignScoreCompatScorer(
             ckpt_path=checkpoint_path,
+            model=self.backbone_path,
             cache_dir=self._cache_dir,
             batch_size=self.batch_size,
             device=self.device,

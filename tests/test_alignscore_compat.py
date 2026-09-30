@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.evaluate._alignscore_compat import (
+    _AlignScoreModel,
     _aggregate_sentence_scores,
     _group_source_sentences,
     _load_backbone_assets,
@@ -15,6 +16,21 @@ from src.evaluate._alignscore_compat import (
 
 
 class AlignScoreCompatibilityTests(unittest.TestCase):
+    def test_alignscore_model_initializes_from_local_pretrained_roberta(self) -> None:
+        config = SimpleNamespace(hidden_size=4)
+        base_model = MagicMock()
+        base_model.config = config
+        with patch(
+            "src.evaluate._alignscore_compat.RobertaModel.from_pretrained",
+            return_value=base_model,
+        ) as load_base:
+            model = _AlignScoreModel(config, "models/roberta-base", None, offline=True)
+
+        self.assertEqual(model.bin_layer.weight.shape, (2, 4))
+        self.assertEqual(load_base.call_args.args[0], "models/roberta-base")
+        self.assertTrue(load_base.call_args.kwargs["local_files_only"])
+        self.assertTrue(load_base.call_args.kwargs["add_pooling_layer"])
+
     def test_source_chunking_preserves_sentences_and_order(self) -> None:
         sentences = [f"Sentence {index}." for index in range(6)]
         source = " ".join(["word"] * 700)
@@ -51,7 +67,7 @@ class AlignScoreCompatibilityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            checkpoint_path = root / "AlignScore-large.ckpt"
+            checkpoint_path = root / "AlignScore-base.ckpt"
             checkpoint_path.touch()
             cache_dir = root / "hf-cache"
             cache_dir.mkdir()
@@ -75,8 +91,8 @@ class AlignScoreCompatibilityTests(unittest.TestCase):
                 )
 
             expected_cache = str(cache_dir.resolve())
-            self.assertEqual(load_tokenizer.call_args.args[0], "FacebookAI/roberta-large")
-            self.assertEqual(load_config.call_args.args[0], "FacebookAI/roberta-large")
+            self.assertEqual(load_tokenizer.call_args.args[0], "FacebookAI/roberta-base")
+            self.assertEqual(load_config.call_args.args[0], "FacebookAI/roberta-base")
             self.assertEqual(load_tokenizer.call_args.kwargs["cache_dir"], expected_cache)
             self.assertEqual(load_config.call_args.kwargs["cache_dir"], expected_cache)
             self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
@@ -98,15 +114,100 @@ class AlignScoreCompatibilityTests(unittest.TestCase):
                     return_value=config,
                 ) as load_config,
             ):
-                actual_tokenizer, actual_config = _load_backbone_assets(
-                    "FacebookAI/roberta-large", temporary, offline=True
+                actual_tokenizer, actual_config, reference = _load_backbone_assets(
+                    "FacebookAI/roberta-base", temporary, offline=True
                 )
 
             self.assertIs(actual_tokenizer, tokenizer)
             self.assertIs(actual_config, config)
-            self.assertEqual(load_tokenizer.call_args_list[0].args[0], "FacebookAI/roberta-large")
-            self.assertEqual(load_tokenizer.call_args_list[1].args[0], "roberta-large")
-            self.assertEqual(load_config.call_args.args[0], "roberta-large")
+            self.assertEqual(reference, "roberta-base")
+            self.assertEqual(load_tokenizer.call_args_list[0].args[0], "FacebookAI/roberta-base")
+            self.assertEqual(load_tokenizer.call_args_list[1].args[0], "roberta-base")
+            self.assertEqual(load_config.call_args.args[0], "roberta-base")
+
+    def test_local_backbone_folder_is_used_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tokenizer = object()
+            config = object()
+            with (
+                patch(
+                    "src.evaluate._alignscore_compat.AutoTokenizer.from_pretrained",
+                    return_value=tokenizer,
+                ) as load_tokenizer,
+                patch(
+                    "src.evaluate._alignscore_compat.RobertaConfig.from_pretrained",
+                    return_value=config,
+                ) as load_config,
+            ):
+                actual_tokenizer, actual_config, reference = _load_backbone_assets(
+                    str(root), None, offline=False
+                )
+
+            self.assertIs(actual_tokenizer, tokenizer)
+            self.assertIs(actual_config, config)
+            self.assertEqual(reference, str(root.resolve()))
+            self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
+            self.assertTrue(load_config.call_args.kwargs["local_files_only"])
+
+    def test_tiny_local_roberta_and_alignscore_checkpoint_run_end_to_end(self) -> None:
+        import gc
+        import torch
+        from transformers import RobertaConfig, RobertaModel
+        from src.evaluate._alignscore_compat import AlignScoreCompatScorer
+
+        class TinyTokenizer:
+            model_max_length = 8
+
+            def __call__(self, contexts, claims, **kwargs):
+                del claims, kwargs
+                input_ids = torch.ones((len(contexts), self.model_max_length), dtype=torch.long)
+                return {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
+
+        with tempfile.TemporaryDirectory(prefix="vdt-alignscore-smoke-") as temporary:
+            root = Path(temporary)
+            backbone = root / "roberta-base"
+            backbone.mkdir()
+            config = RobertaConfig(
+                vocab_size=32,
+                hidden_size=16,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                intermediate_size=32,
+                max_position_embeddings=514,
+            )
+            config.save_pretrained(backbone)
+            torch.save(RobertaModel(config).state_dict(), backbone / "pytorch_model.bin")
+            (backbone / "tokenizer.json").touch()
+            model = _AlignScoreModel(
+                config,
+                str(backbone),
+                None,
+                offline=True,
+            )
+            checkpoint_path = root / "AlignScore-base.ckpt"
+            torch.save({"state_dict": model.state_dict()}, checkpoint_path)
+
+            with (
+                patch(
+                    "src.evaluate._alignscore_compat.AutoTokenizer.from_pretrained",
+                    return_value=TinyTokenizer(),
+                ),
+                patch.dict("os.environ", {"HF_HUB_OFFLINE": "1"}),
+            ):
+                scorer = AlignScoreCompatScorer(
+                    ckpt_path=checkpoint_path,
+                    model=str(backbone),
+                    device="cpu",
+                    evaluation_mode="nli",
+                )
+                score = scorer.score(["source text"], ["summary text"])
+
+            self.assertEqual(len(score), 1)
+            self.assertGreaterEqual(score[0], 0.0)
+            self.assertLessEqual(score[0], 1.0)
+            del scorer, model
+            gc.collect()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+{"id":"smoke-1","input":"The city library closes every Monday. It opened in 1998 and welcomes visitors on all other days.","human_sum":"The library is closed on Monday.","llm_sum":"The library is closed every Monday."}

@@ -54,7 +54,7 @@ class BaseEvaluator(abc.ABC):
         self,
         records: list[dict[str, Any]],
         source_col: str = "input",
-        summary_col: str = "abstract_sum",
+        summary_col: str = "llm_sum",
     ) -> list[dict[str, Any]]:
         """Score a list of records and return them with a score column appended.
 

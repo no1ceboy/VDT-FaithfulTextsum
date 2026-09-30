@@ -31,7 +31,7 @@ def build_prompt(source: str, style: str | None = None) -> list[dict[str, str]]:
 def read_records(
     input_path: str | Path,
     source_col: str = "input",
-    reference_col: str = "abstract_sum",
+    reference_col: str = "human_sum",
     id_col: str = "id",
 ) -> list[dict[str, Any]]:
     """Read and validate JSONL without silently coercing bad or missing fields."""
@@ -48,12 +48,35 @@ def read_records(
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
             if not isinstance(raw, dict):
                 raise ValueError(f"{path}:{line_number}: each JSONL row must be an object")
+            if source_col not in raw:
+                fields = ", ".join(sorted(map(str, raw))) or "<none>"
+                raise ValueError(
+                    f"{path}:{line_number}: source column {source_col!r} is missing; "
+                    f"fields found: {fields}"
+                )
+            if reference_col not in raw:
+                fields = ", ".join(sorted(map(str, raw))) or "<none>"
+                likely_names = ("abstract_sum", "human_sum", "reference", "summary")
+                suggestions = [name for name in likely_names if name in raw]
+                hint = (
+                    f" Possible reference field: {', '.join(suggestions)}; pass it with --reference_col."
+                    if suggestions
+                    else " Pass the actual human-reference field with --reference_col."
+                )
+                raise ValueError(
+                    f"{path}:{line_number}: reference column {reference_col!r} is missing; "
+                    f"fields found: {fields}.{hint}"
+                )
             source = raw.get(source_col)
             reference = raw.get(reference_col)
             if not isinstance(source, str) or not source.strip():
-                raise ValueError(f"{path}:{line_number}: {source_col!r} must be a non-empty string")
+                raise ValueError(
+                    f"{path}:{line_number}: {source_col!r} exists but must contain a non-empty string"
+                )
             if not isinstance(reference, str) or not reference.strip():
-                raise ValueError(f"{path}:{line_number}: {reference_col!r} must be a non-empty string")
+                raise ValueError(
+                    f"{path}:{line_number}: {reference_col!r} exists but must contain a non-empty string"
+                )
 
             record_id = str(raw.get(id_col, line_number)).strip()
             if not record_id:
@@ -84,6 +107,29 @@ def read_records(
     if not records:
         raise ValueError(f"{path}: no non-empty JSONL records found")
     return records
+
+
+def read_records_from_files(
+    input_paths: list[str | Path],
+    source_col: str = "input",
+    reference_col: str = "human_sum",
+    id_col: str = "id",
+) -> list[dict[str, Any]]:
+    """Validate and combine same-schema JSONL files before a single grouped split."""
+    paths = [Path(path) for path in input_paths]
+    if not paths:
+        raise ValueError("At least one input JSONL file is required")
+
+    merged: list[dict[str, Any]] = []
+    multiple_files = len(paths) > 1
+    for file_index, path in enumerate(paths, start=1):
+        rows = read_records(path, source_col, reference_col, id_col)
+        for row in rows:
+            if multiple_files:
+                row["id"] = f"{file_index:03d}:{path.name}:{row['id']}"
+                row["source_file"] = path.name
+            merged.append(row)
+    return merged
 
 
 def validate_prepared_record(row: dict[str, Any]) -> None:

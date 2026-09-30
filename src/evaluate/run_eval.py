@@ -4,7 +4,8 @@ Example:
     python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl \
         --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge \
         --factcc_model_path models/factcc \
-        --alignscore_ckpt models/alignscore/AlignScore-large.ckpt \
+        --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
+        --alignscore_backbone_path models/roberta-base \
         --hf_cache_dir models/hf-cache \
         --nltk_data_dir models/nltk_data --offline \
         --batch_size 2 --limit 10 --output results/smoke.jsonl
@@ -29,6 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_SUMMARY_COLUMNS = ("human_sum", "llm_sum")
 
 
 def _project_path(value: str) -> Path:
@@ -85,6 +87,121 @@ def _nltk_data_root(value: str) -> Path:
     return path
 
 
+def _validate_roberta_base_folder(path: Path) -> None:
+    """Require local config, pretrained weights, and tokenizer before loading."""
+    missing: list[str] = []
+    if not (path / "config.json").is_file():
+        missing.append("config.json")
+    if not any(
+        (path / name).is_file()
+        for name in (
+            "model.safetensors",
+            "pytorch_model.bin",
+            "model.safetensors.index.json",
+            "pytorch_model.bin.index.json",
+        )
+    ):
+        missing.append("model.safetensors or pytorch_model.bin (or a shard index)")
+    if not (
+        (path / "tokenizer.json").is_file()
+        or ((path / "vocab.json").is_file() and (path / "merges.txt").is_file())
+    ):
+        missing.append("tokenizer.json or vocab.json plus merges.txt")
+    if missing:
+        raise FileNotFoundError(
+            f"{path} is not a complete local roberta-base folder; missing: "
+            + ", ".join(missing)
+            + ". Extract the full model folder there, or set --alignscore_backbone_path."
+        )
+
+
+def _cached_roberta_base(cache_dir: str | Path) -> Path | None:
+    """Find a complete roberta-base snapshot inside a transferred Hub cache."""
+    try:
+        cache_root = _hf_cache_root(str(cache_dir))
+    except FileNotFoundError:
+        return None
+    for entry_name in ("models--FacebookAI--roberta-base", "models--roberta-base"):
+        entry = cache_root / entry_name
+        snapshots = entry / "snapshots"
+        if not snapshots.is_dir():
+            continue
+        candidates: list[Path] = []
+        ref = entry / "refs" / "main"
+        if ref.is_file():
+            revision = ref.read_text(encoding="utf-8").strip()
+            if revision:
+                candidates.append(snapshots / revision)
+        candidates.extend(
+            sorted(
+                (child for child in snapshots.iterdir() if child.is_dir()),
+                key=lambda child: child.stat().st_mtime,
+                reverse=True,
+            )
+        )
+        for candidate in candidates:
+            try:
+                _validate_roberta_base_folder(candidate)
+            except FileNotFoundError:
+                continue
+            return candidate.resolve()
+    return None
+
+
+def _resolve_roberta_base(backbone_path: str, cache_dir: str | None) -> Path:
+    """Prefer the standard extracted folder, then a matching local Hub snapshot."""
+    requested = _project_path(backbone_path)
+    if requested.is_dir():
+        try:
+            _validate_roberta_base_folder(requested)
+            return requested
+        except FileNotFoundError:
+            pass
+    if cache_dir:
+        cached = _cached_roberta_base(_project_path(cache_dir))
+        if cached is not None:
+            logger.info("Using roberta-base from local Hugging Face snapshot: %s", cached)
+            return cached
+    raise FileNotFoundError(
+        f"Complete roberta-base assets were not found at {requested} or in the local "
+        f"Hugging Face cache {cache_dir!r}. The model folder must include config, "
+        "pretrained weights, and tokenizer files."
+    )
+
+
+def _summary_columns(
+    records: list[dict[str, Any]],
+    single_column: str | None = None,
+    multiple_columns: list[str] | None = None,
+) -> list[str]:
+    """Prefer the project's paired schema while retaining the old abstract_sum field."""
+    if multiple_columns:
+        return multiple_columns
+    if single_column:
+        return [single_column]
+    if all(all(column in record for record in records) for column in _DEFAULT_SUMMARY_COLUMNS):
+        return list(_DEFAULT_SUMMARY_COLUMNS)
+    if all("llm_sum" in record for record in records):
+        return ["llm_sum"]
+    if all("human_sum" in record for record in records):
+        return ["human_sum"]
+    if all("abstract_sum" in record for record in records):
+        return ["abstract_sum"]
+    raise ValueError("Could not infer summary fields. Pass --summary_col or --summary_cols.")
+
+
+def _default_metrics(
+    records: list[dict[str, Any]], reference_col: str, summary_cols: list[str]
+) -> list[str]:
+    """Pick bundled core metrics; add ROUGE only when a reference is present."""
+    metrics = ["factcc", "minicheck", "alignscore"]
+    if all(reference_col in record for record in records) and any(
+        column != reference_col for column in summary_cols
+    ):
+        metrics.append("rouge")
+    return metrics
+
+
 def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
     """Return evaluator factories so only one model is resident at a time."""
     device = args.device
@@ -119,8 +236,12 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
         registry["alignscore"] = partial(
             AlignScoreEvaluator,
             device=device,
-            model_path=args.alignscore_ckpt,
-            cache_dir=str(_project_path(args.hf_cache_dir)) if args.hf_cache_dir else None,
+            model_path=(str(_project_path(args.alignscore_ckpt)) if args.alignscore_ckpt else None),
+            backbone_path=(
+                str(_project_path(args.alignscore_backbone_path))
+                if args.alignscore_backbone_path
+                else None
+            ),
             batch_size=args.batch_size,
             evaluation_mode=args.alignscore_mode,
         )
@@ -130,7 +251,7 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
         registry["qafacteval"] = partial(
             QAFactEvalEvaluator,
             device=device,
-            model_path=args.qafacteval_model_path,
+            model_path=str(_project_path(args.qafacteval_model_path)),
             batch_size=args.batch_size,
             cuda_device=cuda_device,
         )
@@ -144,7 +265,11 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
         registry["bertscore"] = partial(
             BertScoreEvaluator,
             device=device,
-            model_path=args.bertscore_model_path,
+            model_path=(
+                str(_project_path(args.bertscore_model_path))
+                if args.bertscore_model_path
+                else None
+            ),
             num_layers=args.bertscore_num_layers,
             reference_col=args.reference_col,
             batch_size=args.batch_size,
@@ -252,7 +377,7 @@ def parse_args() -> argparse.Namespace:
         "--metrics",
         nargs="+",
         choices=["factcc", "fenice", "minicheck", "alignscore", "qafacteval", "rouge", "bertscore"],
-        default=["factcc", "fenice", "minicheck", "alignscore", "qafacteval"],
+        default=None,
     )
     parser.add_argument(
         "--reference_col",
@@ -275,14 +400,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument(
         "--factcc_model_path",
-        default=None,
+        default="models/factcc",
         help="Local FactCC checkpoint root; relative paths resolve from the project root",
     )
     parser.add_argument("--minicheck_chunk_size", type=int, default=None, help="MiniCheck source word chunk length; default 500")
-    parser.add_argument("--alignscore_ckpt", default=None, help="Local AlignScore .ckpt file")
+    parser.add_argument(
+        "--alignscore_ckpt",
+        default="models/alignscore/AlignScore-base.ckpt",
+        help="Local AlignScore-base .ckpt file",
+    )
+    parser.add_argument(
+        "--alignscore_backbone_path",
+        default="models/roberta-base",
+        help="Local roberta-base model/tokenizer folder paired with AlignScore-base",
+    )
     parser.add_argument("--alignscore_mode", default="nli_sp", choices=["nli_sp", "nli", "bin_sp", "bin"])
     parser.add_argument("--qafacteval_model_path", default="./models", help="Local QAFactEval model folder from download_models.sh")
-    parser.add_argument("--hf_cache_dir", default=None, help="Shared local Hugging Face cache for MiniCheck and AlignScore")
+    parser.add_argument(
+        "--hf_cache_dir",
+        default="models/hf-cache",
+        help="Local Hugging Face cache or extracted MiniCheck model folder",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N records; 0 means all")
     parser.add_argument("--offline", action="store_true", help="Disable Hugging Face network downloads")
     parser.add_argument(
@@ -304,15 +442,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.data = str(_project_path(args.data))
+    records = load_records(args.data)
+    if args.limit:
+        records = records[: args.limit]
+
+    summary_cols = _summary_columns(records, args.summary_col, args.summary_cols)
+
+    if args.metrics is None:
+        args.metrics = _default_metrics(records, args.reference_col, summary_cols)
+
     if "factcc" in args.metrics:
-        if not args.factcc_model_path:
-            raise ValueError("FactCC requires --factcc_model_path pointing to a local checkpoint directory")
         factcc_dir = _project_path(args.factcc_model_path)
         if not factcc_dir.is_dir():
             raise FileNotFoundError(
-                f"FactCC checkpoint directory not found: {factcc_dir}. Relative model paths are "
-                f"resolved from the project root ({PROJECT_ROOT}); extract the checkpoint under "
-                "models/factcc or pass its absolute directory."
+                f"FactCC checkpoint directory not found: {factcc_dir}. Extract the checkpoint "
+                "under models/factcc or pass --factcc_model_path."
             )
         has_config = (factcc_dir / "config.json").is_file()
         has_weights = any(
@@ -331,12 +476,33 @@ def main() -> int:
         if not has_config or not has_weights or not has_tokenizer:
             raise FileNotFoundError(
                 f"{factcc_dir} is not a complete FactCC checkpoint root. It must directly contain "
-                "config.json, model weights (pytorch_model.bin or model.safetensors), and tokenizer "
-                "files (usually vocab.txt). If extraction added a nested folder, point "
-                "--factcc_model_path at that inner folder."
+                "config.json, model weights, and tokenizer files (usually vocab.txt). If extraction "
+                "added a nested folder, point --factcc_model_path at that inner folder."
             )
+        args.factcc_model_path = str(factcc_dir)
+
+    if "alignscore" in args.metrics:
+        checkpoint_path = _project_path(args.alignscore_ckpt)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"AlignScore checkpoint not found: {checkpoint_path}. Expected AlignScore-base.ckpt; "
+                "pass --alignscore_ckpt if it is elsewhere."
+            )
+        args.alignscore_ckpt = str(checkpoint_path)
+        backbone_path = _resolve_roberta_base(
+            args.alignscore_backbone_path, args.hf_cache_dir
+        )
+        args.alignscore_backbone_path = str(backbone_path)
+
+    if "minicheck" in args.metrics:
+        if not args.hf_cache_dir:
+            raise ValueError("MiniCheck requires --hf_cache_dir with its local model/cache")
+        args.hf_cache_dir = str(_hf_cache_root(args.hf_cache_dir))
+        os.environ["HF_HUB_CACHE"] = args.hf_cache_dir
+        os.environ["HUGGINGFACE_HUB_CACHE"] = args.hf_cache_dir
+
     if args.nltk_data_dir:
-        nltk_data_dir = _nltk_data_root(args.nltk_data_dir)
+        nltk_data_dir = _nltk_data_root(str(_project_path(args.nltk_data_dir)))
         if not nltk_data_dir.is_dir():
             raise FileNotFoundError(f"NLTK data directory not found: {nltk_data_dir}")
         import nltk
@@ -363,16 +529,7 @@ def main() -> int:
     if args.offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    if args.hf_cache_dir:
-        cache_dir = str(_hf_cache_root(args.hf_cache_dir))
-        args.hf_cache_dir = cache_dir
-        os.environ["HF_HUB_CACHE"] = cache_dir
-        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
 
-    records = load_records(args.data)
-    if args.limit:
-        records = records[: args.limit]
-    summary_cols = args.summary_cols or [args.summary_col or "abstract_sum"]
     required_columns = [args.source_col, *summary_cols]
     if {"rouge", "bertscore"}.intersection(args.metrics):
         required_columns.append(args.reference_col)
@@ -411,6 +568,7 @@ def main() -> int:
         except ImportError:
             pass
 
+    args.output = str(_project_path(args.output))
     save_results(results, args.output)
     save_summary(results, summary_cols, args.metrics, args.output)
     save_errors(errors, args.output)

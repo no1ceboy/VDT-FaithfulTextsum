@@ -82,6 +82,28 @@ class MiniCheckCompatibilityTests(unittest.TestCase):
             self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
             self.assertTrue(load_model.call_args.kwargs["local_files_only"])
 
+    def test_extracted_model_folder_is_loaded_without_hub_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary)
+            for filename in ("config.json", "model.safetensors", "tokenizer.json"):
+                (model_dir / filename).touch()
+            tokenizer = SimpleNamespace(eos_token="</s>")
+            model = MagicMock()
+            model.to.return_value = model
+            model.eval.return_value = model
+
+            with (
+                patch("src.evaluate._minicheck_compat.AutoTokenizer.from_pretrained", return_value=tokenizer) as load_tokenizer,
+                patch("src.evaluate._minicheck_compat.AutoModelForSeq2SeqLM.from_pretrained", return_value=model) as load_model,
+                patch.dict("os.environ", {}, clear=True),
+            ):
+                MiniCheckCompatScorer(cache_dir=model_dir, device="cpu")
+
+            self.assertEqual(load_tokenizer.call_args.args[0], str(model_dir.resolve()))
+            self.assertEqual(load_model.call_args.args[0], str(model_dir.resolve()))
+            self.assertIsNone(load_tokenizer.call_args.kwargs["cache_dir"])
+            self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
+
 
 if __name__ == "__main__":
     unittest.main()

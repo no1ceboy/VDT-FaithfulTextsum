@@ -130,7 +130,12 @@ class MiniCheckCompatScorer:
         model_reference = _MODEL_ID
         cache_path = Path(cache_dir) if cache_dir is not None else None
         if cache_path is not None and (cache_path / "config.json").is_file():
-            weight_files = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
+            weight_files = (
+                "model.safetensors",
+                "pytorch_model.bin",
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            )
             if any((cache_path / filename).is_file() for filename in weight_files):
                 model_reference = str(cache_path.resolve())
                 cache_path = None
@@ -145,14 +150,18 @@ class MiniCheckCompatScorer:
         except OSError as exc:
             if offline:
                 cache_description = (
-                    str(cache_path.resolve()) if cache_path is not None else "the default Hugging Face cache"
+                    str(cache_path.resolve())
+                    if cache_path is not None
+                    else model_reference
                 )
                 raise FileNotFoundError(
                     "MiniCheck could not load its model from "
                     f"{cache_description}. The cache must contain a complete snapshot for "
                     "lytang/MiniCheck-Flan-T5-Large (config, tokenizer, and model weights). "
-                    "Pass --hf_cache_dir pointing to the directory that directly contains "
-                    "the models--... cache entries; do not point it inside snapshots/ or blobs/."
+                    "Either pass --hf_cache_dir pointing to the Hugging Face cache root "
+                    "containing models--lytang--MiniCheck-Flan-T5-Large, or point it directly "
+                    "at an extracted model folder containing config.json, model weights, and "
+                    "tokenizer files. Do not point inside a cache snapshots/ or blobs/ folder."
                 ) from exc
             raise
         self.model.to(self.device).eval()

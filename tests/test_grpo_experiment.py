@@ -13,6 +13,7 @@ from pathlib import Path
 from src.training.grpo_data import (
     build_prompt,
     read_records,
+    read_records_from_files,
     split_records,
     validate_prepared_record,
 )
@@ -34,10 +35,85 @@ class GrpoDataTests(unittest.TestCase):
 
     def test_included_example_conforms_to_prepared_schema(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
-        (row,) = read_records(project_root / "data" / "sample.jsonl")
+        (row,) = read_records(project_root / "data" / "sample.jsonl", reference_col="abstract_sum")
         validate_prepared_record(row)
         self.assertEqual(row["id"], "7")
         self.assertNotIn(row["reference"], " ".join(message["content"] for message in row["prompt"]))
+
+    def test_missing_reference_column_reports_available_sample_field(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        sample = project_root / "data" / "sample.jsonl"
+        with self.assertRaisesRegex(ValueError, "Possible reference field: abstract_sum"):
+            read_records(sample)
+
+    def test_prepare_cli_combines_multiple_files_before_splitting(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "prepare_grpo_data.py"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(project_root)
+        with tempfile.TemporaryDirectory(prefix="vdt-grpo-multi-input-") as temporary:
+            temporary_path = Path(temporary)
+            first_path = temporary_path / "part-a.jsonl"
+            second_path = temporary_path / "part-b.jsonl"
+            first_rows = [
+                {"id": str(index), "input": f"source {index}", "human_sum": f"summary {index}"}
+                for index in range(1, 6)
+            ]
+            second_rows = [
+                {"id": str(index), "input": f"source {index + 5}", "human_sum": f"summary {index + 5}"}
+                for index in range(1, 6)
+            ]
+            first_rows[0]["input"] = "shared source"
+            second_rows[0]["input"] = " shared   source "
+            first_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in first_rows), encoding="utf-8"
+            )
+            second_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in second_rows), encoding="utf-8"
+            )
+            output_dir = temporary_path / "splits"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--input",
+                    str(first_path),
+                    str(second_path),
+                    "--output_dir",
+                    str(output_dir),
+                    "--validation_fraction",
+                    "0.2",
+                    "--test_fraction",
+                    "0.2",
+                ],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "data_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["input_files"]), 2)
+            self.assertEqual(manifest["records_total"], 10)
+            combined = read_records_from_files(
+                [first_path, second_path], source_col="input", reference_col="human_sum"
+            )
+            self.assertEqual(len({row["id"] for row in combined}), 10)
+            self.assertEqual({row["source_file"] for row in combined}, {"part-a.jsonl", "part-b.jsonl"})
+            splits = {
+                split_name: read_records(output_dir / f"{split_name}.jsonl", "source", "reference")
+                for split_name in ("train", "validation", "test")
+            }
+            shared_source_splits = [
+                split_name
+                for split_name, rows in splits.items()
+                if any(" ".join(row["source"].split()) == "shared source" for row in rows)
+            ]
+            self.assertEqual(len(shared_source_splits), 1)
+            self.assertTrue(
+                all(":" in row["id"] for rows in splits.values() for row in rows)
+            )
 
     def test_prepare_cli_smoke_test_writes_manifest_and_split_files(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
@@ -53,6 +129,8 @@ class GrpoDataTests(unittest.TestCase):
                     str(script),
                     "--input",
                     str(sample),
+                    "--reference_col",
+                    "abstract_sum",
                     "--output_dir",
                     str(output_dir),
                     "--validation_fraction",
@@ -130,6 +208,26 @@ class GrpoRewardTests(unittest.TestCase):
 
         self.assertEqual(scores, [0.75])
         evaluator_type.assert_called_once_with(device="cpu", batch_size=4, cache_dir=cache_dir)
+
+    def test_alignscore_reward_passes_checkpoint_and_matching_local_backbone(self) -> None:
+        checkpoint = "models/alignscore/AlignScore-base.ckpt"
+        backbone = "models/roberta-base"
+        with patch("src.evaluate.alignscore_eval.AlignScoreEvaluator") as evaluator_type:
+            evaluator_type.return_value.evaluate.return_value = [{"alignscore_score": 0.6}]
+            reward = make_metric_reward(
+                "alignscore",
+                alignscore_ckpt=checkpoint,
+                alignscore_backbone_path=backbone,
+            )
+            scores = reward(["summary"], source=["source"])
+
+        self.assertEqual(scores, [0.6])
+        evaluator_type.assert_called_once_with(
+            device="cpu",
+            model_path=checkpoint,
+            backbone_path=backbone,
+            batch_size=4,
+        )
 
 
 if __name__ == "__main__":

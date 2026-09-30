@@ -1,117 +1,29 @@
-VDT-FaithfulTextsum: company-machine usage
-==========================================
+VDT-FaithfulTextsum company run
 
-This procedure runs the packaged Python module directly; it does not call a
-Bash helper and does not install packages. Use the Python environment and
-model files already approved/provisioned on the company machine.
+From the repo root, use the IT-approved environment. Do not pip-install or
+download models from Hugging Face. Merge the current code ZIP over the source;
+preserve `models/`.
 
-1. Download the current source archive from
-   `https://github.com/no1ceboy/VDT-FaithfulTextsum/archive/refs/heads/main.zip`
-   (or upload the current checkout) and extract it into a project directory.
-   The source includes evaluation and experimental SFT/GRPO code, tests, sample
-   data, documentation, and dependency manifests. It does not contain Python,
-   installed packages, model weights, NLTK data, or ignored datasets. Extract
-   the separately uploaded model archives into the project's `models/` folder
-   as described below.
-   Open a terminal with the IT-approved Python environment active, and change
-   the working directory to the extracted project root.
+Extract MiniCheck into the existing cache (the ZIP has files at its root):
 
-2. From the extracted repository root, check the module command and approved
-   Python dependencies. No custom PYTHONPATH or project installation is needed:
+  python -m zipfile -e VDT-FaithfulTextsum-MiniCheck-Flan-T5-Large.zip models/hf-cache
 
-  python -m src.evaluate.run_eval --help
-  python -c "import torch, transformers, nltk, sentencepiece; print('torch', torch.__version__, 'transformers', transformers.__version__, 'cuda', torch.cuda.is_available())"
+10-record evaluation smoke test (`input`, `human_sum`, `llm_sum`):
 
-3. NLTK's `punkt_tab` data is separate from model checkpoints. The
-   `VDT-FaithfulTextsum-punkt_tab.zip` is from NLTK's official data repository,
-   but the current inventory lists it without a declared license. Transfer and
-   use it only if company IT/compliance approves. If approved, Step 4 gives the
-   exact extraction location; otherwise ask IT to provide an approved NLTK
-   data path.
+  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --offline --nltk_data_dir models/nltk_data --batch_size 2 --limit 10 --output results/smoke.jsonl
 
-4. From the project root, create/use its `models/` directory and extract the
-   already-uploaded model archives into this layout:
+After it succeeds, rerun without `--limit 10`; change output to
+`results/baseline.jsonl`.
 
-     models/
-       factcc/                           # FactCC config.json + model weights
-       hf-cache/                         # original Hugging Face cache ZIP; preserve its layout
-       alignscore/AlignScore-large.ckpt
-       nltk_data/tokenizers/punkt_tab/   # only if approved by IT/compliance
+GRPO pilot (after baseline evaluation; requires IT-provisioned TRL/PEFT and a
+local 3B instruct checkpoint):
 
-   Keep the Hugging Face cache ZIP's internal structure intact under
-   `models/hf-cache/`; it contains MiniCheck and the RoBERTa tokenizer/config
-   used by AlignScore. The AlignScore cache entry may be named
-   `models--FacebookAI--roberta-large` or the legacy `models--roberta-large`.
-   Do not flatten the `models--...`, `snapshots`, `refs`, or `blobs`
-   directories. `--hf_cache_dir` points to the cache root; the CLI can also
-   locate it when the archive adds a common enclosing `huggingface/hub`
-   directory. The
-   AlignScore `.ckpt` contains its trained RoBERTa weights, so the HF cache
-   supplies only the tokenizer/config for that backbone.
+  python scripts/prepare_grpo_data.py --input /data/vdt/summaries.jsonl --output_dir /data/vdt/grpo_splits --source_col input --reference_col human_sum --validation_fraction 0.1 --test_fraction 0.1 --seed 42
+  python scripts/train_grpo.py --model models/Llama-3.2-3B-Instruct --train_jsonl /data/vdt/grpo_splits/train.jsonl --output_dir models/runs/grpo_minicheck_001 --faithfulness_metrics minicheck --hf_cache_dir models/hf-cache --num_generations 4 --reference_weight 0.25 --seed 42
 
-   If approved, extract `punkt_tab.zip` inside
-   `models/nltk_data/tokenizers/`, yielding
-   `models/nltk_data/tokenizers/punkt_tab/english/...`.
-   `--nltk_data_dir` must point to the `nltk_data` directory (parent of
-   `tokenizers`), not to `punkt_tab` or a Python package directory.
-   If FactCC is included, `models/factcc/` must directly contain `config.json`,
-   model weights, and tokenizer files such as `vocab.txt`; the CLI resolves this
-   relative path from the project root and reports a clear error if the ZIP
-   added another enclosing folder.
-
-5. Run a 10-record smoke test. The required score inputs are `input`,
-   `human_sum`, and `llm_sum`. ROUGE needs no checkpoint; the FactCC,
-   MiniCheck and AlignScore files are found through `models/hf-cache/` below.
-   BERTScore is omitted until its separate multilingual encoder folder is uploaded.
-
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --factcc_model_path models/factcc --alignscore_ckpt models/alignscore/AlignScore-large.ckpt --hf_cache_dir models/hf-cache --nltk_data_dir models/nltk_data --offline --batch_size 2 --limit 10 --output results/smoke.jsonl
-
-If that succeeds, rerun the same command without `--limit 10` and change the
-output path to `results/baseline.jsonl`. The input is JSONL, one record per
-line, with `input`, `human_sum`, and `llm_sum` fields. Output includes one row
-per input, metric columns, aggregate means/counts in a TSV, and an errors TSV
-if any metric fails. `--device cpu` is a slower fallback if CUDA is
-unavailable or runs out of memory.
-
-ROUGE-1/2/L use a local, no-stemming implementation; `llm_sum__rouge_score` is
-ROUGE-L F1, and its mean is reported in the summary TSV. ROUGE and BERTScore
-compare `llm_sum` against `human_sum`; they do not judge source faithfulness.
-The human-reference row is null for those two metrics to avoid a perfect
-self-match. BERTScore is implemented with the already-provisioned
-PyTorch/Transformers packages and does not need the separate `bert-score`
-package, but it does need its own local model folder. When that folder has
-been uploaded to `models/bert-base-multilingual-cased`,
-run BERTScore with:
-
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_col llm_sum --metrics bertscore --bertscore_model_path models/bert-base-multilingual-cased --offline --batch_size 2 --output results/bertscore.jsonl
-
-To run only ROUGE, use:
-
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_col llm_sum --metrics rouge --output results/rouge.jsonl
-
-That command needs no checkpoint, NLTK data, or extra dependency.
-
-FENICE and QAFactEval are separate cases. The current FENICE adapter can load
-the upstream package, but FENICE pins Transformers ~=4.38.2, conflicting with
-this project's >=4.56.2 stack. Its upstream license is CC BY-NC-SA 4.0, so do
-not use it for company work unless compliance approves. QAFactEval's official
-code requires its own package and model tree, so ask IT to provision a
-compatible Python environment; its adapter is available with:
-
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols llm_sum --metrics qafacteval --qafacteval_model_path models/qafacteval --offline --batch_size 2 --output results/qafacteval.jsonl
-
-Run that separately in the approved environment if dependencies conflict,
-writing a separate output file. Check the downloaded model assets' terms as
-well as the upstream code license.
-
-If a dependency or NLTK resource is missing, retain the error and ask IT to
-provision it. Do not use pip, Hub downloads, or the repository's local
-dependency installer on the company machine. Scores on Vietnamese are
-exploratory; ROUGE is lexical overlap and BERTScore's multilingual encoder is
-not a factual-consistency metric.
-
-The repository also contains experimental SFT/GRPO scripts. Their environment
-and command details are in `GRPO_EXPERIMENT.md`; `requirements-grpo.txt` is a
-provisioning target for IT, not permission to install packages on the company
-machine. Training still requires its base model/checkpoint and an approved
-TRL/PEFT/PyTorch stack.
+The input file's reference-field name must match `--reference_col` (for
+example, the included sample uses `abstract_sum`; company data may use
+`human_sum`). For multiple same-schema JSONL files, list all paths after
+`--input`; they are combined before one grouped split, with per-file IDs
+namespaced. Only `train.jsonl` is used for training; validation/test stay held
+out. The pilot reward is exploratory for Vietnamese. See `GRPO_EXPERIMENT.md`.
