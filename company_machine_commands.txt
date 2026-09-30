@@ -43,6 +43,8 @@ local 3B instruct checkpoint):
     --faithfulness_metrics minicheck \
     --hf_cache_dir models/hf-cache \
     --num_generations 4 \
+    --num_generations_eval 1 \
+    --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
     --reference_weight 0.25 \
     --eval_strategy epoch \

@@ -62,6 +62,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=0.0, help="GRPO KL coefficient; 0 disables a separate reference model")
     parser.add_argument("--num_generations", type=int, default=4)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument(
+        "--num_generations_eval",
+        type=int,
+        default=1,
+        help="Validation generations per prompt; 1 keeps eval compatible with a one-example eval batch",
+    )
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -196,8 +203,11 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Pat
             or not math.isfinite(args.beta) or args.beta < 0
             or not math.isfinite(args.weight_decay) or args.weight_decay < 0):
         raise ValueError("learning rate must be positive; beta and weight_decay must be non-negative")
-    if args.num_generations < 2 or args.gradient_accumulation_steps < 1 or args.per_device_train_batch_size < 1:
-        raise ValueError("num_generations must be >= 2; batch and accumulation sizes must be positive")
+    if (args.num_generations < 2 or args.num_generations_eval < 1
+            or args.gradient_accumulation_steps < 1
+            or args.per_device_train_batch_size < 1
+            or args.per_device_eval_batch_size < 1):
+        raise ValueError("num_generations must be >= 2; eval generations, batch sizes, and accumulation must be positive")
     if (args.max_prompt_tokens < 1 or args.max_completion_length < 1
             or not math.isfinite(args.num_train_epochs) or args.num_train_epochs <= 0):
         raise ValueError("prompt/completion limits and num_train_epochs must be positive")
@@ -448,6 +458,13 @@ def main() -> int:
                 f"Effective global batch ({effective_batch}) must be divisible by num_generations "
                 f"({args.num_generations}); adjust batch, accumulation, or generation count."
             )
+        effective_eval_batch = world_size * args.per_device_eval_batch_size
+        if eval_dataset is not None and effective_eval_batch % args.num_generations_eval:
+            raise ValueError(
+                f"Effective eval batch ({effective_eval_batch}) must be divisible by num_generations_eval "
+                f"({args.num_generations_eval}); use --num_generations_eval 1 for eval batch size 1, "
+                "or increase --per_device_eval_batch_size."
+            )
         if args.use_vllm and args.vllm_mode == "colocate" and args.vllm_tensor_parallel_size > torch.cuda.device_count():
             raise ValueError("Colocated vLLM tensor parallel size exceeds the visible CUDA device count")
 
@@ -471,9 +488,10 @@ def main() -> int:
             max_grad_norm=args.max_grad_norm,
             optim=args.optim,
             per_device_train_batch_size=args.per_device_train_batch_size,
-            per_device_eval_batch_size=args.per_device_train_batch_size,
+            per_device_eval_batch_size=args.per_device_eval_batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             num_generations=args.num_generations,
+            num_generations_eval=args.num_generations_eval,
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
@@ -583,6 +601,9 @@ def main() -> int:
                 "world_size": world_size,
                 "effective_global_batch": effective_batch,
                 "num_generations": args.num_generations,
+                "per_device_eval_batch_size": args.per_device_eval_batch_size,
+                "effective_eval_batch": effective_eval_batch,
+                "num_generations_eval": args.num_generations_eval,
             },
             "generation": {
                 "temperature": args.temperature,
