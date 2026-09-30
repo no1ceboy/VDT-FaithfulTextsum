@@ -195,9 +195,11 @@ def _summary_columns(
 
 
 def _source_column(records: list[dict[str, Any]], requested: str | None = None) -> str:
-    """Infer the source field, preferring the canonical ``source`` name."""
+    """Infer the source field, preferring canonical ``text`` then ``source``."""
     if requested:
         return requested
+    if all("text" in record for record in records):
+        return "text"
     if all("source" in record for record in records):
         return "source"
     if all("input" in record for record in records):

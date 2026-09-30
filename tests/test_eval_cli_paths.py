@@ -44,6 +44,12 @@ class EvalCliPathTests(unittest.TestCase):
             ["factcc", "minicheck", "alignscore"],
         )
 
+    def test_text_summary_schema_is_selected_by_default(self) -> None:
+        rows = [{"id": "1", "text": "source", "summary": "summary"}]
+        self.assertEqual(_source_column(rows), "text")
+        self.assertEqual(_summary_columns(rows), ["summary"])
+        self.assertEqual(_reference_column(rows), "summary")
+
     def test_cli_accepts_canonical_source_summary_rows(self) -> None:
         row = {"id": "1", "source": "A source document.", "summary": "A short summary."}
         with tempfile.TemporaryDirectory(prefix="vdt-canonical-eval-") as temporary:

@@ -36,9 +36,9 @@ def read_records(
 ) -> list[dict[str, Any]]:
     """Read and validate JSONL without silently coercing bad or missing fields.
 
-    The preferred raw schema is ``id/source/summary``.  The historical
-    ``id/input/human_sum`` schema remains supported, and explicit column names
-    always take precedence over inference.
+    The preferred raw schema is ``id/text/summary``.  ``source`` is accepted
+    as an equivalent source name, and the historical ``id/input/human_sum``
+    schema remains supported. Explicit column names always take precedence.
     """
     path = Path(input_path)
     records: list[dict[str, Any]] = []
@@ -127,14 +127,17 @@ def infer_columns(
 ) -> tuple[str, str]:
     """Resolve raw source/reference fields from one JSON object.
 
-    ``source/summary`` is the canonical schema.  When no canonical fields are
-    present, the legacy defaults are retained so old datasets fail with a
-    useful suggestion instead of being silently reinterpreted.
+    ``text/summary`` is the canonical schema. ``source/summary`` is accepted
+    as an equivalent spelling. When neither is present, the legacy defaults
+    are retained so old datasets fail with a useful suggestion instead of
+    being silently reinterpreted.
     """
-    resolved_source = source_col or ("source" if "source" in raw else "input")
+    resolved_source = source_col or (
+        "text" if "text" in raw else "source" if "source" in raw else "input"
+    )
     if reference_col:
         resolved_reference = reference_col
-    elif "summary" in raw and "source" in raw:
+    elif "summary" in raw and ("text" in raw or "source" in raw):
         resolved_reference = "summary"
     else:
         resolved_reference = "human_sum"

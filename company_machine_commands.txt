@@ -8,7 +8,7 @@ Extract MiniCheck into the existing cache (the ZIP has files at its root):
 
   python -m zipfile -e VDT-FaithfulTextsum-MiniCheck-Flan-T5-Large.zip models/hf-cache
 
-10-record evaluation smoke test (auto-detects canonical `source`/`summary` or legacy fields):
+10-record evaluation smoke test (auto-detects canonical `text`/`summary` or legacy fields):
 
   python -m src.evaluate.run_eval \
     --data /data/vdt/summaries.jsonl \

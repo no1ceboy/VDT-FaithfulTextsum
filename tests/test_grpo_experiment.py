@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.training.grpo_data import (
     build_prompt,
+    infer_columns,
     read_records,
     read_records_from_files,
     infer_columns_from_file,
@@ -33,6 +34,12 @@ class GrpoDataTests(unittest.TestCase):
         self.assertNotIn(secret_reference, " ".join(message["content"] for message in prompt))
         self.assertIn("Nguồn thông tin.", prompt[-1]["content"])
         self.assertIn("daily", prompt[-1]["content"])
+
+    def test_text_is_the_canonical_source_alias(self) -> None:
+        self.assertEqual(
+            infer_columns({"id": "1", "text": "document", "summary": "summary"}),
+            ("text", "summary"),
+        )
 
     def test_included_example_conforms_to_prepared_schema(self) -> None:
         project_root = Path(__file__).resolve().parents[1]

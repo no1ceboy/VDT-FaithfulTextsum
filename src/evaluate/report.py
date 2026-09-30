@@ -170,7 +170,7 @@ def build_report(
     metrics = score_summary(records)
     text_fields = [
         key
-        for key in ("source", "input", "summary", "human_sum", "llm_sum")
+        for key in ("text", "source", "input", "summary", "human_sum", "llm_sum")
         if all(key in row and isinstance(row[key], str) for row in records)
     ]
     length_rows = []

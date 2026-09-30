@@ -7,16 +7,16 @@ This repository evaluates factual consistency in summaries and includes an exper
 Use UTF-8 JSONL with one record per document. The canonical human-training format is:
 
 ```json
-{"id":"7","source":"source document text","summary":"human summary"}
+{"id":"7","text":"source document text","summary":"human summary"}
 ```
 
-Here, `summary` is the human reference used to prepare SFT/GRPO data. The original file is read-only; preparation writes separate split files under the selected output directory. `source` is the grounding document. Source-based factuality metrics score a candidate summary against it. ROUGE and BERTScore compare a generated candidate to a separate human reference. The older paired format remains supported:
+Here, `summary` is the human reference used to prepare SFT/GRPO data. The original file is read-only; preparation writes separate split files under the selected output directory. `text` is the grounding document. Source-based factuality metrics score a candidate summary against it. ROUGE and BERTScore compare a generated candidate to a separate human reference. `source` is also accepted as an alias. The older paired format remains supported:
 
 ```json
 {"id":"7","input":"source document text","human_sum":"human summary","llm_sum":"LLM summary"}
 ```
 
-The evaluator and preparer auto-detect `source`/`summary`, then the legacy `input`/`human_sum` names. Use explicit `--source_col`, `--summary_col`, or `--reference_col` when a file contains several candidate columns.
+The evaluator and preparer auto-detect `text`/`summary`, then `source`/`summary`, then the legacy `input`/`human_sum` names. Use explicit `--source_col`, `--summary_col`, or `--reference_col` when a file contains several candidate columns.
 
 ## Local models and offline runs
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate summaries from prepared rows or raw ``id/source/summary`` JSONL."""
+"""Generate summaries from prepared rows or raw ``id/text/summary`` JSONL."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(row.get("prompt"), list):
                 validate_prepared_record(row)
             else:
-                source = row.get("source")
+                source = row.get("text", row.get("source"))
                 reference = row.get("summary")
                 if not isinstance(source, str) or not source.strip():
                     raise ValueError(
@@ -91,7 +91,7 @@ def main() -> int:
     parser.add_argument(
         "--input_jsonl",
         required=True,
-        help="Prepared JSONL, or raw canonical rows with id/source/summary",
+        help="Prepared JSONL, or raw canonical rows with id/text/summary",
     )
     parser.add_argument("--existing_jsonl", help="Optional prior generation output to merge by id")
     parser.add_argument("--output", required=True, help="New JSONL output compatible with scripts/run_eval.py")
@@ -135,7 +135,7 @@ def main() -> int:
                 raise ValueError("Existing output IDs do not exactly match the prepared input IDs")
             for row in rows:
                 old = existing[str(row["id"])]
-                old_source = old.get("source", old.get("input"))
+                old_source = old.get("text", old.get("source", old.get("input")))
                 old_reference = old.get("human_sum", old.get("reference"))
                 if old_source != row["source"] or old_reference != row["reference"]:
                     raise ValueError(f"Existing row {row['id']!r} has a different source or human reference")
