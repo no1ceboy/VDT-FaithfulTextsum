@@ -10,7 +10,15 @@ Extract MiniCheck into the existing cache (the ZIP has files at its root):
 
 10-record evaluation smoke test (`input`, `human_sum`, `llm_sum`):
 
-  python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --summary_cols human_sum llm_sum --metrics factcc minicheck alignscore rouge --offline --nltk_data_dir models/nltk_data --batch_size 2 --limit 10 --output results/smoke.jsonl
+  python -m src.evaluate.run_eval \
+    --data /data/vdt/summaries.jsonl \
+    --summary_cols human_sum llm_sum \
+    --metrics factcc minicheck alignscore rouge \
+    --offline \
+    --nltk_data_dir models/nltk_data \
+    --batch_size 2 \
+    --limit 10 \
+    --output results/smoke.jsonl
 
 After it succeeds, rerun without `--limit 10`; change output to
 `results/baseline.jsonl`.
@@ -18,8 +26,36 @@ After it succeeds, rerun without `--limit 10`; change output to
 GRPO pilot (after baseline evaluation; requires IT-provisioned TRL/PEFT and a
 local 3B instruct checkpoint):
 
-  python scripts/prepare_grpo_data.py --input /data/vdt/summaries.jsonl --output_dir /data/vdt/grpo_splits --source_col input --reference_col human_sum --validation_fraction 0.1 --test_fraction 0.1 --seed 42
-  python scripts/train_grpo.py --model models/Llama-3.2-3B-Instruct --train_jsonl /data/vdt/grpo_splits/train.jsonl --output_dir models/runs/grpo_minicheck_001 --faithfulness_metrics minicheck --hf_cache_dir models/hf-cache --num_generations 4 --reference_weight 0.25 --seed 42
+  python scripts/prepare_grpo_data.py \
+    --input /data/vdt/summaries.jsonl \
+    --output_dir results/grpo_splits \
+    --source_col input \
+    --reference_col human_sum \
+    --validation_fraction 0.1 \
+    --test_fraction 0.1 \
+    --seed 42
+
+  python -m src.training.train_grpo \
+    --model models/Llama-3.2-3B-Instruct \
+    --train_jsonl results/grpo_splits/train.jsonl \
+    --eval_jsonl results/grpo_splits/validation.jsonl \
+    --output_dir outputs/grpo_lora_minicheck_001 \
+    --faithfulness_metrics minicheck \
+    --hf_cache_dir models/hf-cache \
+    --num_generations 4 \
+    --gradient_accumulation_steps 4 \
+    --reference_weight 0.25 \
+    --eval_strategy epoch \
+    --report_to tensorboard \
+    --run_name grpo-lora-minicheck-001 \
+    --ablation lora-minicheck-plus-reference \
+    --finetuning_method lora \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --use_vllm \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.25 \
+    --seed 42
 
 The input file's reference-field name must match `--reference_col` (for
 example, the included sample uses `abstract_sum`; company data may use

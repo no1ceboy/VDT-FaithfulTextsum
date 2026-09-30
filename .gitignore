@@ -15,6 +15,7 @@ env/
 
 # Evaluation results (large, not tracked)
 results/
+outputs/
 
 # Model checkpoints / caches
 models/

@@ -29,6 +29,11 @@ def main() -> int:
         help="One or more same-schema JSONL files; combine them before splitting",
     )
     parser.add_argument("--output_dir", required=True, help="New or existing directory for split files")
+    parser.add_argument(
+        "--allow_external_output",
+        action="store_true",
+        help="Explicitly allow writing split files outside this repository (only when approved)",
+    )
     parser.add_argument("--source_col", default="input")
     parser.add_argument("--reference_col", default="human_sum")
     parser.add_argument("--id_col", default="id")
@@ -44,7 +49,18 @@ def main() -> int:
 
     try:
         input_paths = [Path(path).resolve() for path in args.input]
-        output_dir = Path(args.output_dir).resolve()
+        output_dir_arg = Path(args.output_dir).expanduser()
+        output_dir = (output_dir_arg if output_dir_arg.is_absolute() else REPO_ROOT / output_dir_arg).resolve()
+        if output_dir == REPO_ROOT:
+            raise ValueError("Refusing to write split files into the repository root; choose a dedicated results/ folder")
+        try:
+            output_dir.relative_to(REPO_ROOT)
+        except ValueError:
+            if not args.allow_external_output:
+                raise ValueError(
+                    f"Refusing output outside the repository: {output_dir}; use a path under results/ "
+                    "or pass --allow_external_output only if that location is approved"
+                )
         train_path = output_dir / "train.jsonl"
         validation_path = output_dir / "validation.jsonl"
         test_path = output_dir / "test.jsonl"

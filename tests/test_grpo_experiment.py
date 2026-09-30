@@ -81,6 +81,7 @@ class GrpoDataTests(unittest.TestCase):
                     str(second_path),
                     "--output_dir",
                     str(output_dir),
+                    "--allow_external_output",
                     "--validation_fraction",
                     "0.2",
                     "--test_fraction",
@@ -133,6 +134,7 @@ class GrpoDataTests(unittest.TestCase):
                     "abstract_sum",
                     "--output_dir",
                     str(output_dir),
+                    "--allow_external_output",
                     "--validation_fraction",
                     "0",
                     "--test_fraction",
@@ -152,6 +154,39 @@ class GrpoDataTests(unittest.TestCase):
             self.assertEqual(len(read_records(output_dir / "train.jsonl", "source", "reference")), 1)
             self.assertTrue((output_dir / "validation.jsonl").exists())
             self.assertTrue((output_dir / "test.jsonl").exists())
+
+    def test_prepare_cli_refuses_external_output_without_explicit_override(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "prepare_grpo_data.py"
+        sample = project_root / "data" / "sample.jsonl"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(project_root)
+        with tempfile.TemporaryDirectory(prefix="vdt-grpo-external-guard-") as temporary:
+            output_dir = Path(temporary) / "must-not-be-created"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--input",
+                    str(sample),
+                    "--reference_col",
+                    "abstract_sum",
+                    "--output_dir",
+                    str(output_dir),
+                    "--validation_fraction",
+                    "0",
+                    "--test_fraction",
+                    "0",
+                ],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Refusing output outside the repository", result.stderr)
+            self.assertFalse(output_dir.exists())
 
     def test_duplicate_sources_stay_in_same_split(self) -> None:
         rows = [

@@ -1,4 +1,4 @@
-# Vietnamese faithful summarization: SFT + GRPO pilot
+# Vietnamese faithful summarization: GRPO pilot
 
 This is an experimental research scaffold, not a validated production training recipe. It uses the human summary as a reference signal, then optionally adds one existing factuality evaluator as a black-box reward. The reference is never placed in the model prompt. Generated summaries are still judged against the source, not against the reference alone.
 
@@ -9,9 +9,10 @@ The experiment asks whether a local instruction model, adapted with Vietnamese s
 Report at least these comparisons on the same untouched test set:
 
 1. The base instruction model.
-2. The optional SFT warm-start, if run.
-3. The GRPO adapter.
-4. The human reference as a descriptive ceiling/baseline, not as perfect truth.
+2. GRPO with LoRA (recommended first training treatment).
+3. Optional QLoRA and full fine-tuning (FFT) ablations.
+4. Optional SFT warm-start, if run.
+5. The human reference as a descriptive baseline, not as perfect truth.
 
 Report each metric separately, output length and coverage checks, and a blinded human review of source-supported claims. Do not claim improved Vietnamese faithfulness from a metric-score increase alone. The included FactCC, MiniCheck and AlignScore adapters are not validated or calibrated for Vietnamese; the metric reward is therefore an experimental treatment that needs human validation.
 
@@ -19,9 +20,9 @@ Report each metric separately, output length and coverage checks, and a blinded 
 
 The suggested first *candidate* generator is `meta-llama/Llama-3.2-3B-Instruct`, transferred as a local checkpoint directory and passed by path. Vietnamese is not among the [model card's eight officially supported languages](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct), and its out-of-scope section cautions against use in unsupported languages; another section says developers may fine-tune beyond those languages under the license and acceptable-use policy. Resolve this with company legal/research approval before treating Llama as an acceptable Vietnamese candidate. I would compare it with a Vietnamese-centered checkpoint under the same split before choosing a final model. The scripts force Hugging Face/Transformers offline mode and require local model paths; they do not download a model or install packages.
 
-`requirements-grpo.txt` targets TRL 0.29.0 and its PEFT extra, but is intentionally not presented as a complete lockfile or as compatible with every company CUDA image. The APIs follow the [official TRL 0.29.0 GRPO](https://huggingface.co/docs/trl/v0.29.0/grpo_trainer) and [SFT](https://huggingface.co/docs/trl/v0.29.0/sft_trainer) interfaces. Ask IT to provision and freeze a compatible Python/PyTorch/CUDA/Transformers/TRL/PEFT/Datasets environment. The training scripts have not been executed here because this workspace does not have TRL, PEFT, or Accelerate installed and this task must not install them. The package target was chosen to make the expected API explicit; verify the provisioned environment with `trl env` and a short approved smoke run.
+`requirements-grpo.txt` targets TRL 1.9.2 with its PEFT/vLLM extras and TensorBoard. It is an environment request, not a complete lockfile: company IT must provision and freeze compatible Python/PyTorch/CUDA/Transformers/TRL/PEFT/vLLM/Datasets/TensorBoard versions. The scripts enforce TRL 1.9.2 and run locally/offline; they do not install packages. The training path has not been run in this workspace because the company CUDA/vLLM stack is not available here. Check the company environment before a GPU run and start with a short approved pilot.
 
-The initial settings are conservative for a busy GPU: one sequence per device, four sampled completions per prompt, gradient accumulation 4, BF16, LoRA on attention projections, metric models on CPU, no vLLM, and no separate KL reference model (`beta=0`). Four is the number of sampled outputs per prompt, not a required number of distinct training documents. A B200 with 80–100 GB free is ample for a 3B LoRA pilot in principle, but available memory, source length, scorer placement and other GPU users still determine whether a run fits. Start with an approved pilot slice and watch actual memory. The CPU metric scorer may become the speed bottleneck; move it to a GPU only after checking memory headroom.
+The pilot uses one prompt per device, four sampled completions per prompt, gradient accumulation 4, BF16, LoRA on attention projections, CPU metric scorers, and no separate KL reference model (`beta=0`). The example explicitly enables vLLM colocated with training; it can speed rollout generation, but shares GPU memory and may contend with optimization. The CLI leaves vLLM disabled unless `--use_vllm` is passed. Four is the number of sampled outputs per prompt, not the number of training documents. A B200 with 80–100 GB free may be sufficient for this 3B LoRA configuration, but that is not a guarantee; begin with a short pilot and watch the actual GPU memory. The CPU metric scorer may become the bottleneck after generation accelerates.
 
 ## Data contract and leakage controls
 
@@ -42,25 +43,27 @@ Run commands from the repository root. Paths below are examples; on the company 
 ```bash
 python scripts/prepare_grpo_data.py \
   --input /data/vdt/summaries_part1.jsonl /data/vdt/summaries_part2.jsonl \
-  --output_dir /data/vdt/grpo_splits \
+  --output_dir results/grpo_splits \
   --source_col input --reference_col human_sum \
   --validation_fraction 0.1 --test_fraction 0.1 --seed 42
 ```
 
 Pass one or more same-schema JSONL paths after `--input`; the preparer validates and combines them, namespaces IDs by input file, then performs one grouped split across the combined corpus. Review `data_manifest.json`, row counts, duplicate-source grouping, and examples in `train.jsonl`, `validation.jsonl`, and `test.jsonl`. Only `train.jsonl` is for training; held-out records intentionally remain outside it. The `--overwrite` switch replaces these named outputs; otherwise the script refuses to overwrite them.
 
-For a parser-only smoke test on the included legacy single-record sample, use `--reference_col abstract_sum --validation_fraction 0 --test_fraction 0` and an output directory outside the project. Do not train or report evaluation from that one record. As a rough pilot heuristic, treat fewer than 100 training rows as a pipeline/sensitivity exercise rather than evidence of generalization; source diversity matters more than the raw count.
+For a parser-only smoke test on the included legacy single-record sample, use `--reference_col abstract_sum --validation_fraction 0 --test_fraction 0 --output_dir results/parser_smoke`. Do not train or report evaluation from that one record. Outputs are restricted to this repository unless you deliberately pass `--allow_external_output`; keep normal experiments under `results/`. As a rough pilot heuristic, treat fewer than 100 training rows as a pipeline/sensitivity exercise rather than evidence of generalization; source diversity matters more than the raw count.
 
-### 2. Optional SFT warm-start
+### 2. Optional SFT warm-start (not required)
 
-SFT is a useful control and can teach the model the target summary style before reward optimization. It computes loss on the human completion only. `validation.jsonl` is used for reference negative log-likelihood, not as a factuality measure.
+For an already instruction-tuned base such as the proposed Llama Instruct checkpoint, SFT is not a prerequisite: the main experiment can start directly with GRPO. The human summary is already used by the reference-overlap reward, so adding SFT changes the treatment and can amplify reference wording bias. Keep SFT as a separately labeled warm-start/control, or use it if the chosen base model does not follow the summarization prompt. It computes loss on the human completion only. `validation.jsonl` is used for reference negative log-likelihood, not factuality.
 
 ```bash
-python scripts/train_sft.py \
+python -m src.training.train_sft \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl /data/vdt/grpo_splits/train.jsonl \
-  --eval_jsonl /data/vdt/grpo_splits/validation.jsonl \
-  --output_dir models/runs/sft_001
+  --train_jsonl results/grpo_splits/train.jsonl \
+  --eval_jsonl results/grpo_splits/validation.jsonl \
+  --output_dir outputs/sft_001 \
+  --run_name sft-001 --ablation sft-warm-start \
+  --report_to tensorboard --seed 42
 ```
 
 The resulting adapter is `.../sft_001/final_adapter`. You may also skip SFT and start GRPO directly from the instruct checkpoint. Do not use the held-out test split for SFT, hyperparameter selection, or reward tuning.
@@ -69,22 +72,39 @@ The resulting adapter is `.../sft_001/final_adapter`. You may also skip SFT and 
 
 Start with one metric. `--faithfulness_metrics` is required so metric choice is explicit. The reference-overlap reward is included at weight 0.25 by default; the selected faithfulness metric has weight 1.0. TRL sums these weighted components without reward-scale normalization (`scale_rewards=none`), so the weights are part of the scientific treatment and must be recorded. `reference_weight=0` disables the overlap contribution. Combining several metrics requires the explicit `--allow_multiple_metrics` acknowledgement and is not recommended for the first comparison.
 
-MiniCheck example (using the already transferred cache):
+Recommended first comparison: start from the original instruction checkpoint with LoRA (using the already transferred MiniCheck cache):
 
 ```bash
-python scripts/train_grpo.py \
-  --model models/runs/sft_001/final_adapter \
-  --base_model models/Llama-3.2-3B-Instruct \
-  --train_jsonl /data/vdt/grpo_splits/train.jsonl \
-  --output_dir models/runs/grpo_minicheck_001 \
+python -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/grpo_splits/train.jsonl \
+  --eval_jsonl results/grpo_splits/validation.jsonl \
+  --output_dir outputs/grpo_minicheck_001 \
   --faithfulness_metrics minicheck \
   --hf_cache_dir models/hf-cache \
-  --reward_device cpu --seed 42
+  --reward_device cpu --reward_batch_size 4 \
+  --reference_weight 0.25 --metric_weights 1.0 \
+  --learning_rate 1e-6 --lr_scheduler_type linear --warmup_ratio 0.03 \
+  --num_generations 4 --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 4 --num_train_epochs 1 \
+  --max_prompt_tokens 4096 --max_completion_length 256 \
+  --eval_strategy epoch --save_strategy steps --save_steps 50 \
+  --max_checkpoints 2 --logging_steps 1 \
+  --run_name grpo-minicheck-001 --ablation minicheck-plus-reference \
+  --finetuning_method lora --lora_r 16 --lora_alpha 32 \
+  --report_to tensorboard --use_vllm --vllm_mode colocate \
+  --vllm_gpu_memory_utilization 0.25 --precision bf16 --seed 42
 ```
 
-For a base-model start, pass the base checkpoint as `--model` and omit `--base_model`. For FactCC, select `factcc` and provide `--factcc_model_path`. For AlignScore, select `alignscore` and use the default local pair `models/alignscore/AlignScore-base.ckpt` plus `models/roberta-base/`; override `--alignscore_ckpt` and `--alignscore_backbone_path` only when those files are stored elsewhere. MiniCheck uses `--hf_cache_dir` for its own cache/model folder.
+The GRPO runner exposes three update modes: `--finetuning_method lora` (default; compact adapter), `qlora` (4-bit NF4 by default with double quantization; requires company-provisioned `bitsandbytes`), and `fft` (full fine-tuning; saves all model weights). QLoRA still trains LoRA adapters over a quantized base. Run each mode into a separate `outputs/<run-name>/` folder and label `--ablation` accordingly. For a cautious first QLoRA pilot, use `--no-use_vllm`; TRL documents QLoRA and vLLM separately, but this repository/company stack has not verified their combination. FFT has a much larger optimizer-memory footprint than LoRA/QLoRA and should be a separately approved pilot even on a B200. Existing adapter checkpoints may only be continued using LoRA. For a base-model start, pass the base checkpoint as `--model` and omit `--base_model`. For FactCC, select `factcc` and provide `--factcc_model_path`. For AlignScore, select `alignscore` and use the default local pair `models/alignscore/AlignScore-base.ckpt` plus `models/roberta-base/`; override `--alignscore_ckpt` and `--alignscore_backbone_path` only when those files are stored elsewhere. MiniCheck uses `--hf_cache_dir` for its own cache/model folder.
 
-The script fails early for missing local paths, an empty training set, prompts longer than the configured cap, context overflow, or a GPU without BF16. It does not crop source text silently. The GRPO run writes `run_manifest.json`, Trainer checkpoints/logs, and a final LoRA adapter. The manifest records data hash, key hyperparameters, metric/reward weights and runtime choices. The generation script also writes a sidecar manifest with input/output hashes and decoding settings. Treat run directories and generated JSONL as sensitive: they contain source text and summaries. Completion logging is disabled by default.
+Each run is a self-contained folder under `outputs/<run-name>/`, matching VDT-Anonymization's run layout. It contains `run_manifest.json` (full CLI/config, data hashes, hardware and package versions), TensorBoard events under `tensorboard/`, Trainer checkpoints, `training_history.json`, and either `final_adapter/` (LoRA/QLoRA) or `final_model/` (FFT). Resume with `--resume_from_checkpoint outputs/<same-run>/checkpoint-<step>`; the runner checks the training-data hash, base-model path, and fine-tuning method, and keeps the resume inside that run folder. `models/` is reserved for imported model assets; `results/` holds prepared splits and evaluation artifacts. Both training runners reject output paths outside this repo. TensorBoard is local only (`report_to=tensorboard`); completion-text logging stays off unless explicitly requested because generated text may be sensitive. To view curves after training:
+
+```bash
+tensorboard --logdir outputs/grpo_minicheck_001/tensorboard --host 127.0.0.1 --port 6006
+```
+
+The generation script also writes a sidecar manifest with input/output hashes and decoding settings. Treat run directories and generated JSONL as sensitive: they contain source text and summaries.
 
 ### 4. Generate held-out summaries and score them
 
@@ -93,20 +113,20 @@ Generate validation summaries first while choosing settings. Freeze choices befo
 ```bash
 python scripts/generate_summaries.py \
   --model models/Llama-3.2-3B-Instruct \
-  --input_jsonl /data/vdt/grpo_splits/test.jsonl \
-  --output /data/vdt/results/grpo_test.jsonl \
+  --input_jsonl results/grpo_splits/test.jsonl \
+  --output results/grpo_test.jsonl \
   --summary_col base_sum
 
 python scripts/generate_summaries.py \
-  --model models/runs/grpo_minicheck_001/final_adapter \
+  --model outputs/grpo_minicheck_001/final_adapter \
   --base_model models/Llama-3.2-3B-Instruct \
-  --input_jsonl /data/vdt/grpo_splits/test.jsonl \
-  --existing_jsonl /data/vdt/results/grpo_test.jsonl \
-  --output /data/vdt/results/grpo_test_compare.jsonl \
+  --input_jsonl results/grpo_splits/test.jsonl \
+  --existing_jsonl results/grpo_test.jsonl \
+  --output results/grpo_test_compare.jsonl \
   --summary_col grpo_sum
 
 python -m src.evaluate.run_eval \
-  --data /data/vdt/results/grpo_test_compare.jsonl \
+  --data results/grpo_test_compare.jsonl \
   --summary_cols human_sum base_sum grpo_sum \
   --metrics factcc minicheck alignscore \
   --factcc_model_path models/factcc \
@@ -115,10 +135,20 @@ python -m src.evaluate.run_eval \
   --hf_cache_dir models/hf-cache \
   --nltk_data_dir models/nltk_data \
   --offline --batch_size 2 \
-  --output /data/vdt/results/grpo_test_scored.jsonl
+  --output results/grpo_test_scored.jsonl
 ```
 
-To compare base, SFT, and GRPO fairly, generate each from the exact same validation/test rows using the same decoding settings and preserve each output column. The included generator can merge outputs by `id` after confirming source/reference equality. Do not accidentally score a training row as a test example.
+To compare base, LoRA/QLoRA/FFT, optional SFT, and GRPO fairly, generate each from the exact same validation/test rows using the same decoding settings and preserve each output column. The included generator can merge outputs by `id` after confirming source/reference equality. Do not accidentally score a training row as a test example.
+
+### QLoRA and full fine-tuning ablation commands
+
+Keep the base model, splits, reward, seed, and logging settings the same; give each treatment a unique output directory and ablation label. Tune each method using validation only. These are initial pipeline pilots, not a claim of a fair hyperparameter comparison:
+
+```bash
+python -m src.training.train_grpo --model models/Llama-3.2-3B-Instruct --train_jsonl results/grpo_splits/train.jsonl --eval_jsonl results/grpo_splits/validation.jsonl --output_dir outputs/grpo_qlora_minicheck_001 --faithfulness_metrics minicheck --hf_cache_dir models/hf-cache --finetuning_method qlora --no-use_vllm --eval_strategy epoch --report_to tensorboard --run_name grpo-qlora-minicheck-001 --ablation qlora-minicheck-plus-reference --seed 42
+
+python -m src.training.train_grpo --model models/Llama-3.2-3B-Instruct --train_jsonl results/grpo_splits/train.jsonl --eval_jsonl results/grpo_splits/validation.jsonl --output_dir outputs/grpo_fft_minicheck_001 --faithfulness_metrics minicheck --hf_cache_dir models/hf-cache --finetuning_method fft --no-use_vllm --eval_strategy epoch --report_to tensorboard --run_name grpo-fft-minicheck-001 --ablation fft-minicheck-plus-reference --seed 42
+```
 
 ## Reward definitions and limitations
 

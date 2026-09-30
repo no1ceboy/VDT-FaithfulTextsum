@@ -1,5 +1,10 @@
 # Optional research-training stack for the GRPO/SFT scripts.
-# This is a version target, not a tested lockfile. CUDA/PyTorch wheels and the
-# full transitive lock must be selected and provisioned by company IT.
+# Target TRL 1.9.2 plus its PEFT/vLLM extras and local TensorBoard logging.
+# This is not a lockfile: compatible CUDA/PyTorch/vLLM builds and transitive
+# versions must be selected and provisioned by company IT.
 # Do not run pip install on the restricted company machine without IT approval.
-trl[peft]==0.29.0
+trl[peft,vllm]==1.9.2
+tensorboard
+# Only needed when running --finetuning_method qlora; IT must select a build
+# compatible with the approved CUDA/PyTorch stack.
+bitsandbytes
