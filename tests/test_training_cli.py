@@ -7,7 +7,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.training.run_utils import REPO_ROOT
-from src.training.train_grpo import _check_local_inputs, _parse_args
+from src.training.train_grpo import _check_local_inputs, _load_training_dataset, _parse_args
+
+
+class _FakeDataset:
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+        self.column_names = list(rows[0]) if rows else []
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __iter__(self):
+        return iter(self.rows)
+
+    @classmethod
+    def from_list(cls, rows: list[dict]):
+        return cls(rows)
 
 
 class TrainingCliTests(unittest.TestCase):
@@ -92,6 +108,24 @@ class TrainingCliTests(unittest.TestCase):
             args = self._args(root, ["--internal_validation_fraction", "0.1"])
             with self.assertRaisesRegex(ValueError, "requires --eval_strategy"):
                 _check_local_inputs(args)
+
+    def test_raw_text_summary_jsonl_is_converted_to_prepared_rows(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="training-cli-raw-data-") as temporary:
+            path = Path(temporary) / "raw.jsonl"
+            path.write_text(
+                '{"id":"1","text":"A source document.","summary":"A summary."}\n',
+                encoding="utf-8",
+            )
+
+            def fake_load_dataset(*args, **kwargs):
+                del args, kwargs
+                return _FakeDataset([{"id": "1", "text": "A source document.", "summary": "A summary."}])
+
+            dataset, data_format = _load_training_dataset(path, fake_load_dataset, _FakeDataset, "training")
+            self.assertEqual(data_format, "raw_auto_prepared")
+            self.assertEqual(dataset.column_names, ["id", "source", "reference", "prompt"])
+            self.assertEqual(dataset.rows[0]["source"], "A source document.")
+            self.assertEqual(dataset.rows[0]["reference"], "A summary.")
 
     def test_existing_adapter_rejects_non_lora_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="training-cli-adapter-", dir=REPO_ROOT) as temporary:

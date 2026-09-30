@@ -25,7 +25,11 @@ from src.training.run_utils import (
     write_json as _write_json,
 )
 
-from src.training.grpo_data import split_records, validate_prepared_record  # noqa: E402
+from src.training.grpo_data import (
+    read_records,
+    split_records,
+    validate_prepared_record,
+)  # noqa: E402
 from src.training.grpo_rewards import make_metric_reward, reference_char_reward  # noqa: E402
 
 
@@ -33,8 +37,15 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Local base-model directory or local PEFT adapter directory")
     parser.add_argument("--base_model", help="Local base-model directory required when --model is an adapter")
-    parser.add_argument("--train_jsonl", required=True, help="Training split from prepare_grpo_data.py")
-    parser.add_argument("--eval_jsonl", help="Optional validation split; never pass the test split here")
+    parser.add_argument(
+        "--train_jsonl",
+        required=True,
+        help="Raw id/text/summary JSONL or a prepared source/reference/prompt training JSONL",
+    )
+    parser.add_argument(
+        "--eval_jsonl",
+        help="Optional raw or prepared validation JSONL; never pass the test split here",
+    )
     parser.add_argument(
         "--internal_validation_fraction",
         type=float,
@@ -310,8 +321,8 @@ def _rendered_prompt_lengths(dataset: object, tokenizer: object) -> list[tuple[s
     return lengths
 
 
-def _load_prepared_dataset(path: Path, load_dataset, label: str):
-    dataset = load_dataset("json", data_files=str(path), split="train")
+def _validate_prepared_dataset(dataset, label: str):
+    """Validate an already prepared Hugging Face dataset."""
     required_columns = {"id", "source", "reference", "prompt"}
     missing = required_columns - set(dataset.column_names)
     if missing:
@@ -325,6 +336,24 @@ def _load_prepared_dataset(path: Path, load_dataset, label: str):
             raise ValueError(f"Prepared {label} JSONL contains duplicate id {row['id']!r}")
         seen_ids.add(row["id"])
     return dataset
+
+
+def _load_training_dataset(path: Path, load_dataset, dataset_type, label: str):
+    """Load either canonical raw rows or the repository's prepared schema."""
+    dataset = load_dataset("json", data_files=str(path), split="train")
+    required_columns = {"id", "source", "reference", "prompt"}
+    if required_columns.issubset(set(dataset.column_names)):
+        return _validate_prepared_dataset(dataset, label), "prepared"
+
+    try:
+        raw_records = read_records(path)
+    except ValueError as exc:
+        missing = sorted(required_columns - set(dataset.column_names))
+        raise ValueError(
+            f"{path} is neither prepared ({missing} missing) nor a valid raw training file. {exc}"
+        ) from exc
+    prepared = dataset_type.from_list(raw_records)
+    return _validate_prepared_dataset(prepared, label), "raw_auto_prepared"
 
 
 def _normalized_source(source: str) -> str:
@@ -376,8 +405,15 @@ def main() -> int:
                 bnb_4bit_use_double_quant=args.qlora_double_quant,
             )
 
-        train_dataset = _load_prepared_dataset(train_path, load_dataset, "training")
-        eval_dataset = _load_prepared_dataset(eval_path, load_dataset, "validation") if eval_path else None
+        train_dataset, training_data_format = _load_training_dataset(
+            train_path, load_dataset, Dataset, "training"
+        )
+        if eval_path:
+            eval_dataset, validation_data_format = _load_training_dataset(
+                eval_path, load_dataset, Dataset, "validation"
+            )
+        else:
+            eval_dataset, validation_data_format = None, None
         validation_source = "external_jsonl" if eval_dataset is not None else None
         source_rows_before_internal_validation = len(train_dataset)
         if eval_dataset is None and args.internal_validation_fraction:
@@ -597,10 +633,12 @@ def main() -> int:
             "base_model_path": str(base_model_path),
             "training_data": str(train_path),
             "training_data_sha256": _sha256(train_path),
+            "training_data_format": training_data_format,
             "training_rows": len(train_dataset),
             "training_rows_before_internal_validation": source_rows_before_internal_validation,
             "validation_data": str(eval_path) if eval_path else None,
             "validation_data_sha256": _sha256(eval_path) if eval_path else None,
+            "validation_data_format": validation_data_format,
             "validation_rows": len(eval_dataset) if eval_dataset is not None else 0,
             "validation_source": validation_source,
             "internal_validation_fraction": args.internal_validation_fraction,

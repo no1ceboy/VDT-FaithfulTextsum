@@ -82,7 +82,7 @@ The source-based metrics measure factual support; ROUGE and BERTScore instead me
 
 ## Experimental training
 
-The optional [SFT + GRPO pilot](GRPO_EXPERIMENT.md) uses the human summary only as a separate training target/reward reference; it is never included in the generation prompt. It creates source-grouped train/validation/test splits, uses local-only model paths, and writes run manifests. The training stack is separate from the baseline evaluator dependencies; the company environment must be provisioned by IT. `requirements-grpo.txt` is a version target, not a ready-to-install lockfile. Do not run package installers on a restricted machine without IT approval.
+The optional [SFT + GRPO pilot](GRPO_EXPERIMENT.md) uses the human summary only as a separate training target/reward reference; it is never included in the generation prompt. The trainer accepts either prepared rows or raw `id/text/summary` rows and can create an internal source-grouped validation split without rewriting the input. It uses local-only model paths and writes run manifests. The training stack is separate from the baseline evaluator dependencies; the company environment must be provisioned by IT. `requirements-grpo.txt` is a version target, not a ready-to-install lockfile. Do not run package installers on a restricted machine without IT approval.
 
 ## Metric references
 
