@@ -25,7 +25,7 @@ from src.training.run_utils import (
     write_json as _write_json,
 )
 
-from src.training.grpo_data import validate_prepared_record  # noqa: E402
+from src.training.grpo_data import split_records, validate_prepared_record  # noqa: E402
 from src.training.grpo_rewards import make_metric_reward, reference_char_reward  # noqa: E402
 
 
@@ -35,6 +35,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base_model", help="Local base-model directory required when --model is an adapter")
     parser.add_argument("--train_jsonl", required=True, help="Training split from prepare_grpo_data.py")
     parser.add_argument("--eval_jsonl", help="Optional validation split; never pass the test split here")
+    parser.add_argument(
+        "--internal_validation_fraction",
+        type=float,
+        default=0.0,
+        help="Hold out this fraction from --train_jsonl by normalized source groups when --eval_jsonl is absent",
+    )
     parser.add_argument("--output_dir", required=True, help="Unique run directory inside this repository")
     parser.add_argument("--faithfulness_metrics", nargs="+", choices=("factcc", "minicheck", "alignscore"), required=True)
     parser.add_argument("--factcc_model_path", help="Local FactCC checkpoint directory")
@@ -160,10 +166,22 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Pat
         raise ValueError(f"Training JSONL does not exist: {train_path}")
     if eval_path and not eval_path.is_file():
         raise ValueError(f"Validation JSONL does not exist: {eval_path}")
-    if args.eval_strategy != "no" and not eval_path:
+    if args.eval_strategy != "no" and not eval_path and not args.internal_validation_fraction:
         raise ValueError("--eval_strategy requires --eval_jsonl; use the validation split, never the test split")
     if eval_path and args.eval_strategy == "no":
         raise ValueError("--eval_jsonl was provided but --eval_strategy is 'no'; choose steps or epoch")
+    if not 0.0 <= args.internal_validation_fraction < 1.0:
+        raise ValueError("--internal_validation_fraction must be in [0, 1)")
+    if eval_path and args.internal_validation_fraction:
+        raise ValueError(
+            "Use either --eval_jsonl or --internal_validation_fraction, not both; "
+            "the external validation file takes precedence."
+        )
+    if args.internal_validation_fraction and args.eval_strategy == "no":
+        raise ValueError(
+            "--internal_validation_fraction requires --eval_strategy epoch or steps; "
+            "use --internal_validation_fraction 0 to disable validation."
+        )
     if args.resume_from_checkpoint:
         resume_path = _resolve_path(args.resume_from_checkpoint)
         if not resume_path.is_dir() or not _inside(resume_path, output_path):
@@ -342,7 +360,7 @@ def main() -> int:
             os.environ["HF_HUB_CACHE"] = str(_resolve_path(args.hf_cache_dir))
 
         import torch
-        from datasets import load_dataset
+        from datasets import Dataset, load_dataset
         from peft import LoraConfig
         from transformers import AutoConfig, AutoTokenizer
         from trl import GRPOConfig, GRPOTrainer
@@ -360,6 +378,23 @@ def main() -> int:
 
         train_dataset = _load_prepared_dataset(train_path, load_dataset, "training")
         eval_dataset = _load_prepared_dataset(eval_path, load_dataset, "validation") if eval_path else None
+        validation_source = "external_jsonl" if eval_dataset is not None else None
+        source_rows_before_internal_validation = len(train_dataset)
+        if eval_dataset is None and args.internal_validation_fraction:
+            raw_train_rows = [dict(row) for row in train_dataset]
+            train_rows, validation_rows, _ = split_records(
+                raw_train_rows,
+                validation_fraction=args.internal_validation_fraction,
+                test_fraction=0.0,
+                seed=args.data_seed,
+            )
+            train_dataset = Dataset.from_list(train_rows)
+            eval_dataset = Dataset.from_list(validation_rows)
+            validation_source = "internal_source_grouped_split"
+            print(
+                f"Using internal validation: train={len(train_dataset)}, validation={len(eval_dataset)} "
+                f"from {source_rows_before_internal_validation} input rows (fraction={args.internal_validation_fraction}, seed={args.data_seed})"
+            )
         if eval_dataset is not None:
             training_sources = {_normalized_source(row["source"]) for row in train_dataset}
             eval_sources = {_normalized_source(row["source"]) for row in eval_dataset}
@@ -563,9 +598,12 @@ def main() -> int:
             "training_data": str(train_path),
             "training_data_sha256": _sha256(train_path),
             "training_rows": len(train_dataset),
+            "training_rows_before_internal_validation": source_rows_before_internal_validation,
             "validation_data": str(eval_path) if eval_path else None,
             "validation_data_sha256": _sha256(eval_path) if eval_path else None,
             "validation_rows": len(eval_dataset) if eval_dataset is not None else 0,
+            "validation_source": validation_source,
+            "internal_validation_fraction": args.internal_validation_fraction,
             "model_context_limit": context_limit,
             "max_observed_prompt_tokens": max_prompt_length,
             "metrics": args.faithfulness_metrics,

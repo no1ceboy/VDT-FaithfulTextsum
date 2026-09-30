@@ -75,6 +75,24 @@ class TrainingCliTests(unittest.TestCase):
             self.assertEqual(output, root / "run")
             self.assertEqual(args.metric_weights, [0.7])
 
+    def test_internal_validation_can_be_enabled_without_external_eval_file(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="training-cli-internal-validation-", dir=REPO_ROOT) as temporary:
+            root = Path(temporary)
+            args = self._args(
+                root,
+                ["--internal_validation_fraction", "0.1", "--eval_strategy", "epoch"],
+            )
+            _, _, _, validation, _ = _check_local_inputs(args)
+            self.assertIsNone(validation)
+            self.assertEqual(args.internal_validation_fraction, 0.1)
+
+    def test_internal_validation_requires_an_evaluation_strategy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="training-cli-internal-validation-no-eval-", dir=REPO_ROOT) as temporary:
+            root = Path(temporary)
+            args = self._args(root, ["--internal_validation_fraction", "0.1"])
+            with self.assertRaisesRegex(ValueError, "requires --eval_strategy"):
+                _check_local_inputs(args)
+
     def test_existing_adapter_rejects_non_lora_modes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="training-cli-adapter-", dir=REPO_ROOT) as temporary:
             root = Path(temporary)

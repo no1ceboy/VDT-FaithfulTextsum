@@ -40,10 +40,10 @@ local 3B instruct checkpoint):
   python -m src.training.train_grpo \
     --model models/Llama-3.2-3B-Instruct \
     --train_jsonl results/grpo_splits/train.jsonl \
-    --eval_jsonl results/grpo_splits/validation.jsonl \
     --output_dir outputs/grpo_lora_minicheck_001 \
     --faithfulness_metrics minicheck \
     --hf_cache_dir models/hf-cache \
+    --internal_validation_fraction 0.1 \
     --num_generations 4 \
     --num_generations_eval 1 \
     --per_device_eval_batch_size 1 \
