@@ -411,6 +411,7 @@ def main() -> int:
         if args.precision == "bf16" and not torch.cuda.is_bf16_supported():
             raise RuntimeError("BF16 was selected but this GPU/runtime does not report BF16 support")
         model_dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
+        model_dtype_name = "bfloat16" if args.precision == "bf16" else "float16"
 
         is_adapter = (model_path / "adapter_config.json").is_file()
         if is_adapter:
@@ -516,7 +517,9 @@ def main() -> int:
             report_to="tensorboard" if args.report_to == "tensorboard" else "none",
             seed=args.seed,
             data_seed=args.data_seed,
-            model_init_kwargs={"local_files_only": True, "torch_dtype": model_dtype},
+            # Keep the Trainer/TRL config JSON-serializable. TRL resolves this
+            # dtype name back to torch.bfloat16/torch.float16 when loading.
+            model_init_kwargs={"local_files_only": True, "torch_dtype": model_dtype_name},
             log_completions=args.log_completions,
             use_vllm=args.use_vllm,
             vllm_mode=args.vllm_mode,

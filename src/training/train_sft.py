@@ -136,7 +136,7 @@ def main() -> int:
             raise RuntimeError("CUDA is required for this training script")
         if args.precision == "bf16" and not torch.cuda.is_bf16_supported():
             raise RuntimeError("BF16 was selected but this GPU/runtime does not report BF16 support")
-        model_dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
+        model_dtype_name = "bfloat16" if args.precision == "bf16" else "float16"
         tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
         if not tokenizer.chat_template:
             raise ValueError("Local tokenizer has no chat template; add/approve one before using conversational prompts")
@@ -225,7 +225,9 @@ def main() -> int:
             report_to="tensorboard" if args.report_to == "tensorboard" else "none",
             seed=args.seed,
             data_seed=args.seed,
-            model_init_kwargs={"local_files_only": True, "torch_dtype": model_dtype},
+            # Keep the Trainer/TRL config JSON-serializable. TRL resolves this
+            # dtype name back to torch.bfloat16/torch.float16 when loading.
+            model_init_kwargs={"local_files_only": True, "torch_dtype": model_dtype_name},
         )
         output_path.mkdir(parents=True, exist_ok=True)
         if args.report_to == "tensorboard":
