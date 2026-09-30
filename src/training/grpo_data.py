@@ -30,14 +30,21 @@ def build_prompt(source: str, style: str | None = None) -> list[dict[str, str]]:
 
 def read_records(
     input_path: str | Path,
-    source_col: str = "input",
-    reference_col: str = "human_sum",
+    source_col: str | None = None,
+    reference_col: str | None = None,
     id_col: str = "id",
 ) -> list[dict[str, Any]]:
-    """Read and validate JSONL without silently coercing bad or missing fields."""
+    """Read and validate JSONL without silently coercing bad or missing fields.
+
+    The preferred raw schema is ``id/source/summary``.  The historical
+    ``id/input/human_sum`` schema remains supported, and explicit column names
+    always take precedence over inference.
+    """
     path = Path(input_path)
     records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    resolved_source_col: str | None = None
+    resolved_reference_col: str | None = None
     with path.open("r", encoding="utf-8-sig") as stream:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
@@ -48,13 +55,17 @@ def read_records(
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
             if not isinstance(raw, dict):
                 raise ValueError(f"{path}:{line_number}: each JSONL row must be an object")
-            if source_col not in raw:
+            if resolved_source_col is None or resolved_reference_col is None:
+                resolved_source_col, resolved_reference_col = infer_columns(
+                    raw, source_col=source_col, reference_col=reference_col
+                )
+            if resolved_source_col not in raw:
                 fields = ", ".join(sorted(map(str, raw))) or "<none>"
                 raise ValueError(
-                    f"{path}:{line_number}: source column {source_col!r} is missing; "
+                    f"{path}:{line_number}: source column {resolved_source_col!r} is missing; "
                     f"fields found: {fields}"
                 )
-            if reference_col not in raw:
+            if resolved_reference_col not in raw:
                 fields = ", ".join(sorted(map(str, raw))) or "<none>"
                 likely_names = ("abstract_sum", "human_sum", "reference", "summary")
                 suggestions = [name for name in likely_names if name in raw]
@@ -64,18 +75,18 @@ def read_records(
                     else " Pass the actual human-reference field with --reference_col."
                 )
                 raise ValueError(
-                    f"{path}:{line_number}: reference column {reference_col!r} is missing; "
+                    f"{path}:{line_number}: reference column {resolved_reference_col!r} is missing; "
                     f"fields found: {fields}.{hint}"
                 )
-            source = raw.get(source_col)
-            reference = raw.get(reference_col)
+            source = raw.get(resolved_source_col)
+            reference = raw.get(resolved_reference_col)
             if not isinstance(source, str) or not source.strip():
                 raise ValueError(
-                    f"{path}:{line_number}: {source_col!r} exists but must contain a non-empty string"
+                    f"{path}:{line_number}: {resolved_source_col!r} exists but must contain a non-empty string"
                 )
             if not isinstance(reference, str) or not reference.strip():
                 raise ValueError(
-                    f"{path}:{line_number}: {reference_col!r} exists but must contain a non-empty string"
+                    f"{path}:{line_number}: {resolved_reference_col!r} exists but must contain a non-empty string"
                 )
 
             record_id = str(raw.get(id_col, line_number)).strip()
@@ -109,10 +120,52 @@ def read_records(
     return records
 
 
+def infer_columns(
+    raw: dict[str, Any],
+    source_col: str | None = None,
+    reference_col: str | None = None,
+) -> tuple[str, str]:
+    """Resolve raw source/reference fields from one JSON object.
+
+    ``source/summary`` is the canonical schema.  When no canonical fields are
+    present, the legacy defaults are retained so old datasets fail with a
+    useful suggestion instead of being silently reinterpreted.
+    """
+    resolved_source = source_col or ("source" if "source" in raw else "input")
+    if reference_col:
+        resolved_reference = reference_col
+    elif "summary" in raw and "source" in raw:
+        resolved_reference = "summary"
+    else:
+        resolved_reference = "human_sum"
+    return resolved_source, resolved_reference
+
+
+def infer_columns_from_file(
+    input_path: str | Path,
+    source_col: str | None = None,
+    reference_col: str | None = None,
+) -> tuple[str, str]:
+    """Infer raw columns from the first non-empty JSONL object in a file."""
+    path = Path(input_path)
+    with path.open("r", encoding="utf-8-sig") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
+            if not isinstance(raw, dict):
+                raise ValueError(f"{path}:{line_number}: each JSONL row must be an object")
+            return infer_columns(raw, source_col=source_col, reference_col=reference_col)
+    raise ValueError(f"{path}: no non-empty JSONL records found")
+
+
 def read_records_from_files(
     input_paths: list[str | Path],
-    source_col: str = "input",
-    reference_col: str = "human_sum",
+    source_col: str | None = None,
+    reference_col: str | None = None,
     id_col: str = "id",
 ) -> list[dict[str, Any]]:
     """Validate and combine same-schema JSONL files before a single grouped split."""

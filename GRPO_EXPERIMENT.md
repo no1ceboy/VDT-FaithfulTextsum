@@ -26,7 +26,7 @@ The pilot uses one prompt per device, four sampled completions per prompt, gradi
 
 ## Data contract and leakage controls
 
-Input is UTF-8 JSONL, one object per line. By default the source is `input`, the human reference is `human_sum`, and `id` is used for traceability. `llm_sum` is an optional existing system output for baseline evaluation; it is not treated as the human target. `style` is optional. The preparer validates text and IDs, creates a Vietnamese chat prompt, and stores the human reference in a separate `reference` field for reward computation. Prompt construction and the trainer both keep `reference` out of the prompt. The split groups normalized exact duplicate source documents together so they cannot cross train/validation/test. The included legacy sample uses `abstract_sum`, so pass `--reference_col abstract_sum` for that schema.
+Input is UTF-8 JSONL, one object per line. The canonical training schema is `id`, `source`, and `summary`, where `summary` is the human reference. The historical `input`/`human_sum` names remain supported, and explicit column arguments still override inference. `llm_sum` is an optional existing system output for baseline evaluation; it is not treated as the human target. `style` is optional. The preparer validates text and IDs, creates a Vietnamese chat prompt, and stores the human reference in a separate `reference` field for reward computation. Prompt construction and the trainer both keep `reference` out of the prompt. The split groups normalized exact duplicate source documents together so they cannot cross train/validation/test. The included legacy sample uses `abstract_sum`, so pass `--reference_col abstract_sum` for that schema.
 
 ```json
 {"id":"7","style":"daily","input":"văn bản nguồn...","human_sum":"tóm tắt do con người viết...","llm_sum":"tóm tắt do mô hình tạo..."}
@@ -44,11 +44,10 @@ Run commands from the repository root. Paths below are examples; on the company 
 python scripts/prepare_grpo_data.py \
   --input /data/vdt/summaries_part1.jsonl /data/vdt/summaries_part2.jsonl \
   --output_dir results/grpo_splits \
-  --source_col input --reference_col human_sum \
   --validation_fraction 0.1 --test_fraction 0.1 --seed 42
 ```
 
-Pass one or more same-schema JSONL paths after `--input`; the preparer validates and combines them, namespaces IDs by input file, then performs one grouped split across the combined corpus. Review `data_manifest.json`, row counts, duplicate-source grouping, and examples in `train.jsonl`, `validation.jsonl`, and `test.jsonl`. Only `train.jsonl` is for training; held-out records intentionally remain outside it. The `--overwrite` switch replaces these named outputs; otherwise the script refuses to overwrite them.
+Pass one or more same-schema JSONL paths after `--input`; the preparer validates and combines them, namespaces IDs by input file, then performs one grouped split across the combined corpus. Review `data_manifest.json`, row counts, duplicate-source grouping, and examples in `train.jsonl`, `validation.jsonl`, and `test.jsonl`. Only `train.jsonl` is for training; held-out records intentionally remain outside it. The original input files are read-only; the `--overwrite` switch replaces only named outputs in `--output_dir`.
 
 For a parser-only smoke test on the included legacy single-record sample, use `--reference_col abstract_sum --validation_fraction 0 --test_fraction 0 --output_dir results/parser_smoke`. Do not train or report evaluation from that one record. Outputs are restricted to this repository unless you deliberately pass `--allow_external_output`; keep normal experiments under `results/`. As a rough pilot heuristic, treat fewer than 100 training rows as a pipeline/sensitivity exercise rather than evidence of generalization; source diversity matters more than the raw count.
 

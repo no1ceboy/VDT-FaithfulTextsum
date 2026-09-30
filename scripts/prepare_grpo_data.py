@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.training.grpo_data import (  # noqa: E402
     distinct_source_count,
+    infer_columns_from_file,
     read_records_from_files,
     split_records,
     write_jsonl,
@@ -34,8 +35,16 @@ def main() -> int:
         action="store_true",
         help="Explicitly allow writing split files outside this repository (only when approved)",
     )
-    parser.add_argument("--source_col", default="input")
-    parser.add_argument("--reference_col", default="human_sum")
+    parser.add_argument(
+        "--source_col",
+        default=None,
+        help="Source field; auto-detects source for the canonical source/summary schema",
+    )
+    parser.add_argument(
+        "--reference_col",
+        default=None,
+        help="Human reference field; auto-detects summary for the canonical source/summary schema",
+    )
     parser.add_argument("--id_col", default="id")
     parser.add_argument("--validation_fraction", type=float, default=0.1)
     parser.add_argument("--test_fraction", type=float, default=0.1)
@@ -73,6 +82,16 @@ def main() -> int:
         records = read_records_from_files(
             input_paths, args.source_col, args.reference_col, args.id_col
         )
+        resolved_columns = [
+            infer_columns_from_file(path, args.source_col, args.reference_col)
+            for path in input_paths
+        ]
+        if len(set(resolved_columns)) != 1:
+            raise ValueError(
+                "All input files must resolve to the same source/reference columns; "
+                f"found {resolved_columns}"
+            )
+        resolved_source_col, resolved_reference_col = resolved_columns[0]
         train, validation, test = split_records(
             records, args.validation_fraction, args.test_fraction, args.seed
         )
@@ -94,8 +113,8 @@ def main() -> int:
             "input_files": input_file_hashes,
             "input_sha256": combined_digest.hexdigest(),
             "id_namespacing": "<input-order>:<filename>:<original-id>" if len(input_paths) > 1 else "preserved",
-            "source_column": args.source_col,
-            "reference_column": args.reference_col,
+            "source_column": resolved_source_col,
+            "reference_column": resolved_reference_col,
             "id_column": args.id_col,
             "split_seed": args.seed,
             "requested_validation_fraction": args.validation_fraction,

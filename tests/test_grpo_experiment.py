@@ -14,6 +14,7 @@ from src.training.grpo_data import (
     build_prompt,
     read_records,
     read_records_from_files,
+    infer_columns_from_file,
     split_records,
     validate_prepared_record,
 )
@@ -154,6 +155,51 @@ class GrpoDataTests(unittest.TestCase):
             self.assertEqual(len(read_records(output_dir / "train.jsonl", "source", "reference")), 1)
             self.assertTrue((output_dir / "validation.jsonl").exists())
             self.assertTrue((output_dir / "test.jsonl").exists())
+
+    def test_canonical_source_summary_data_is_auto_detected_without_mutating_input(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        script = project_root / "scripts" / "prepare_grpo_data.py"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(project_root)
+        with tempfile.TemporaryDirectory(prefix="vdt-canonical-data-") as temporary:
+            temporary_path = Path(temporary)
+            input_path = temporary_path / "human_data.jsonl"
+            rows = [
+                {"id": str(index), "source": f"document {index}", "summary": f"summary {index}"}
+                for index in range(12)
+            ]
+            input_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            original_bytes = input_path.read_bytes()
+            output_dir = temporary_path / "prepared"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--input",
+                    str(input_path),
+                    "--output_dir",
+                    str(output_dir),
+                    "--allow_external_output",
+                    "--validation_fraction",
+                    "0.2",
+                    "--test_fraction",
+                    "0.2",
+                ],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "data_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_column"], "source")
+            self.assertEqual(manifest["reference_column"], "summary")
+            self.assertTrue((output_dir / "train.jsonl").is_file())
+            self.assertTrue((output_dir / "validation.jsonl").is_file())
+            self.assertTrue((output_dir / "test.jsonl").is_file())
+            self.assertEqual(input_path.read_bytes(), original_bytes)
+            self.assertEqual(infer_columns_from_file(input_path), ("source", "summary"))
 
     def test_prepare_cli_refuses_external_output_without_explicit_override(self) -> None:
         project_root = Path(__file__).resolve().parents[1]

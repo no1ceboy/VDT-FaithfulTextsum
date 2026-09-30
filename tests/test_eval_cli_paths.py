@@ -12,7 +12,9 @@ from src.evaluate.run_eval import (
     _hf_cache_root,
     _nltk_data_root,
     _project_path,
+    _reference_column,
     _resolve_roberta_base,
+    _source_column,
     main,
     _summary_columns,
     _validate_roberta_base_folder,
@@ -31,6 +33,39 @@ class EvalCliPathTests(unittest.TestCase):
             _default_metrics(rows, "human_sum", ["human_sum", "llm_sum"]),
             ["factcc", "minicheck", "alignscore", "rouge"],
         )
+
+    def test_canonical_source_summary_schema_is_selected_by_default(self) -> None:
+        rows = [{"id": "1", "source": "source", "summary": "summary"}]
+        self.assertEqual(_source_column(rows), "source")
+        self.assertEqual(_summary_columns(rows), ["summary"])
+        self.assertEqual(_reference_column(rows), "summary")
+        self.assertEqual(
+            _default_metrics(rows, "summary", ["summary"]),
+            ["factcc", "minicheck", "alignscore"],
+        )
+
+    def test_cli_accepts_canonical_source_summary_rows(self) -> None:
+        row = {"id": "1", "source": "A source document.", "summary": "A short summary."}
+        with tempfile.TemporaryDirectory(prefix="vdt-canonical-eval-") as temporary:
+            root = Path(temporary)
+            data_path = root / "data.jsonl"
+            output_path = root / "scores.jsonl"
+            data_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            with patch(
+                "sys.argv",
+                [
+                    "run_eval",
+                    "--data",
+                    str(data_path),
+                    "--metrics",
+                    "rouge",
+                    "--output",
+                    str(output_path),
+                ],
+            ):
+                self.assertEqual(main(), 0)
+            result = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertIsNone(result["summary__rouge_score"])
 
     def test_legacy_abstract_sum_schema_remains_supported(self) -> None:
         self.assertEqual(_summary_columns([{"input": "source", "abstract_sum": "summary"}]), ["abstract_sum"])

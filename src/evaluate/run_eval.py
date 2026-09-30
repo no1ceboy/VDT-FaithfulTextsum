@@ -174,7 +174,7 @@ def _summary_columns(
     single_column: str | None = None,
     multiple_columns: list[str] | None = None,
 ) -> list[str]:
-    """Prefer the project's paired schema while retaining the old abstract_sum field."""
+    """Infer candidate summary fields across canonical and legacy schemas."""
     if multiple_columns:
         return multiple_columns
     if single_column:
@@ -183,11 +183,42 @@ def _summary_columns(
         return list(_DEFAULT_SUMMARY_COLUMNS)
     if all("llm_sum" in record for record in records):
         return ["llm_sum"]
+    if all("human_sum" in record and "summary" in record for record in records):
+        return ["human_sum", "summary"]
     if all("human_sum" in record for record in records):
         return ["human_sum"]
+    if all("summary" in record for record in records):
+        return ["summary"]
     if all("abstract_sum" in record for record in records):
         return ["abstract_sum"]
     raise ValueError("Could not infer summary fields. Pass --summary_col or --summary_cols.")
+
+
+def _source_column(records: list[dict[str, Any]], requested: str | None = None) -> str:
+    """Infer the source field, preferring the canonical ``source`` name."""
+    if requested:
+        return requested
+    if all("source" in record for record in records):
+        return "source"
+    if all("input" in record for record in records):
+        return "input"
+    raise ValueError("Could not infer the source field. Pass --source_col.")
+
+
+def _reference_column(records: list[dict[str, Any]], requested: str | None = None) -> str:
+    """Infer the reference field used by ROUGE/BERTScore.
+
+    A canonical ``summary``-only file has no separate model candidate, so the
+    field is treated as its own reference and reference metrics return null for
+    that same field.  A generated comparison file should include a separate
+    ``human_sum`` (or explicit ``--reference_col``) field.
+    """
+    if requested:
+        return requested
+    for candidate in ("human_sum", "reference", "abstract_sum", "summary"):
+        if all(candidate in record for record in records):
+            return candidate
+    return "human_sum"
 
 
 def _default_metrics(
@@ -370,7 +401,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data", required=True, help="Input JSONL or JSON file")
-    parser.add_argument("--source_col", default="input", help="Source document field")
+    parser.add_argument(
+        "--source_col",
+        default=None,
+        help="Source document field; auto-detects source, then legacy input",
+    )
     parser.add_argument("--summary_col", default=None, help="One summary field (legacy/single-column mode)")
     parser.add_argument("--summary_cols", nargs="+", default=None, help="Summary fields to score in one run")
     parser.add_argument(
@@ -381,8 +416,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reference_col",
-        default="human_sum",
-        help="Human/reference summary field for ROUGE and BERTScore",
+        default=None,
+        help="Human/reference summary field for ROUGE and BERTScore; auto-detected when omitted",
     )
     parser.add_argument(
         "--bertscore_model_path",
@@ -447,6 +482,8 @@ def main() -> int:
     if args.limit:
         records = records[: args.limit]
 
+    args.source_col = _source_column(records, args.source_col)
+    args.reference_col = _reference_column(records, args.reference_col)
     summary_cols = _summary_columns(records, args.summary_col, args.summary_cols)
 
     if args.metrics is None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate one summary per prepared JSONL row using a local model or PEFT adapter."""
+"""Generate summaries from prepared rows or raw ``id/source/summary`` JSONL."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.training.grpo_data import validate_prepared_record  # noqa: E402
+from src.training.grpo_data import build_prompt, validate_prepared_record  # noqa: E402
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -25,9 +25,32 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            if not isinstance(row, dict) or not isinstance(row.get("prompt"), list):
-                raise ValueError(f"{path}:{line_number}: expected a prepared conversational JSONL row")
-            validate_prepared_record(row)
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_number}: each JSONL row must be an object")
+            if isinstance(row.get("prompt"), list):
+                validate_prepared_record(row)
+            else:
+                source = row.get("source")
+                reference = row.get("summary")
+                if not isinstance(source, str) or not source.strip():
+                    raise ValueError(
+                        f"{path}:{line_number}: raw generation rows require a non-empty source field"
+                    )
+                if not isinstance(reference, str) or not reference.strip():
+                    raise ValueError(
+                        f"{path}:{line_number}: raw generation rows require a non-empty summary field"
+                    )
+                style = row.get("style")
+                if style is not None and not isinstance(style, str):
+                    raise ValueError(f"{path}:{line_number}: style must be a string when present")
+                row = {
+                    "id": str(row.get("id", line_number)).strip(),
+                    "source": source.strip(),
+                    "reference": reference.strip(),
+                    "prompt": build_prompt(source, style),
+                    **({"style": style} if style is not None else {}),
+                }
+                validate_prepared_record(row)
             rows.append(row)
     if not rows:
         raise ValueError(f"No records found in {path}")
@@ -65,7 +88,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Local base model or PEFT adapter directory")
     parser.add_argument("--base_model", help="Local base checkpoint required when --model is an adapter")
-    parser.add_argument("--input_jsonl", required=True, help="Prepared eval.jsonl")
+    parser.add_argument(
+        "--input_jsonl",
+        required=True,
+        help="Prepared JSONL, or raw canonical rows with id/source/summary",
+    )
     parser.add_argument("--existing_jsonl", help="Optional prior generation output to merge by id")
     parser.add_argument("--output", required=True, help="New JSONL output compatible with scripts/run_eval.py")
     parser.add_argument("--summary_col", default="llm_sum", help="Name of generated summary field")
@@ -90,7 +117,7 @@ def main() -> int:
             raise ValueError(f"Input JSONL does not exist: {input_path}")
         if existing_path and not existing_path.is_file():
             raise ValueError(f"Existing generation JSONL does not exist: {existing_path}")
-        if args.summary_col in {"id", "input", "human_sum"}:
+        if args.summary_col in {"id", "input", "source", "human_sum", "reference"}:
             raise ValueError("summary_col must not replace a reserved id/source/reference column")
         if output_path.exists():
             raise FileExistsError(f"Refusing to replace existing output: {output_path}")
@@ -108,7 +135,9 @@ def main() -> int:
                 raise ValueError("Existing output IDs do not exactly match the prepared input IDs")
             for row in rows:
                 old = existing[str(row["id"])]
-                if old.get("input") != row["source"] or old.get("human_sum") != row["reference"]:
+                old_source = old.get("source", old.get("input"))
+                old_reference = old.get("human_sum", old.get("reference"))
+                if old_source != row["source"] or old_reference != row["reference"]:
                     raise ValueError(f"Existing row {row['id']!r} has a different source or human reference")
                 if args.summary_col in old:
                     raise ValueError(f"Existing row {row['id']!r} already has summary column {args.summary_col!r}")
@@ -194,7 +223,7 @@ def main() -> int:
                             if existing is not None
                             else {
                                 "id": row["id"],
-                                "input": row["source"],
+                                "source": row["source"],
                                 "human_sum": row["reference"],
                             }
                         )

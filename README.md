@@ -4,13 +4,19 @@ This repository evaluates factual consistency in summaries and includes an exper
 
 ## Input data
 
-Use JSONL with one record per document. Keep the original source and summaries in separate fields:
+Use UTF-8 JSONL with one record per document. The canonical human-training format is:
+
+```json
+{"id":"7","source":"source document text","summary":"human summary"}
+```
+
+Here, `summary` is the human reference used to prepare SFT/GRPO data. The original file is read-only; preparation writes separate split files under the selected output directory. `source` is the grounding document. Source-based factuality metrics score a candidate summary against it. ROUGE and BERTScore compare a generated candidate to a separate human reference. The older paired format remains supported:
 
 ```json
 {"id":"7","input":"source document text","human_sum":"human summary","llm_sum":"LLM summary"}
 ```
 
-`input` is the grounding document. Source-based factuality metrics score each summary against it. ROUGE and BERTScore instead compare generated summaries to `human_sum`; the human summary is not assumed to be factually perfect.
+The evaluator and preparer auto-detect `source`/`summary`, then the legacy `input`/`human_sum` names. Use explicit `--source_col`, `--summary_col`, or `--reference_col` when a file contains several candidate columns.
 
 ## Local models and offline runs
 
@@ -58,9 +64,15 @@ The CLI defaults to CUDA for the company GPU. On a CPU-only machine, add
 python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --offline --nltk_data_dir models/nltk_data --batch_size 2 --limit 10 --output results/smoke.jsonl
 ```
 
-The default run selects `human_sum` and `llm_sum` from the paired schema, scores them with FactCC, MiniCheck, and AlignScore, and adds ROUGE when the human reference is present. FactCC, AlignScore, RoBERTa, and MiniCheck assets are resolved from their standard `models/` folders above. The command adds separate score fields; `llm_sum__rouge_score` is ROUGE-L F1. BERTScore is not included until its separate model checkpoint has been uploaded; to enable it, extract a complete multilingual BERT folder to `models/bert-base-multilingual-cased`, add `bertscore` to `--metrics`, and add `--bertscore_model_path models/bert-base-multilingual-cased`. The human summary has null ROUGE/BERTScore values because it is the reference. The `.summary.tsv` reports each summary-column/metric mean and valid count. Legacy datasets with an `abstract_sum` column remain supported.
+The default run selects `human_sum` and `llm_sum` from the paired schema, scores them with FactCC, MiniCheck, and AlignScore, and adds ROUGE when the human reference is present. For a canonical `source`/`summary` file, the default run scores `summary` with the source-based metrics; reference metrics need a separate generated candidate. FactCC, AlignScore, RoBERTa, and MiniCheck assets are resolved from their standard `models/` folders above. The command adds separate score fields; `llm_sum__rouge_score` is ROUGE-L F1. BERTScore is not included until its separate model checkpoint has been uploaded; to enable it, extract a complete multilingual BERT folder to `models/bert-base-multilingual-cased`, add `bertscore` to `--metrics`, and add `--bertscore_model_path models/bert-base-multilingual-cased`. The human summary has null ROUGE/BERTScore values because it is the reference. The `.summary.tsv` reports each summary-column/metric mean and valid count. Legacy datasets with an `abstract_sum` column remain supported.
 
-Inspect the small-slice results, then rerun the same command without `--limit 10` for the full dataset. The CLI accepts `--summary_col` for a single summary field; `--summary_cols` evaluates several fields in one run while loading each metric once.
+Inspect the small-slice results, then rerun the same command without `--limit 10` for the full dataset. The CLI accepts `--summary_col` for a single summary field; `--summary_cols` evaluates several fields in one run while loading each metric once. Create a dependency-free HTML visualization and JSON aggregate from scored JSONL with:
+
+```text
+python scripts/make_report.py --input results/baseline.jsonl --output results/baseline_report.html
+```
+
+The report includes mean/median/standard deviation, valid/missing counts, inline score bars, text-length checks, and the adjacent machine-readable JSON. Add `--run_dir outputs/grpo_lora_minicheck_001` to include the training manifest and recent training history. TensorBoard remains the detailed training visualization when the company environment provides it.
 
 ## Reading the scores
 
