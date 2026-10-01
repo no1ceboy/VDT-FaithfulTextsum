@@ -27,43 +27,220 @@ Create an HTML/JSON results report without extra packages:
     --input results/baseline.jsonl \
     --output results/baseline_report.html
 
-GRPO pilot (after baseline evaluation; requires IT-provisioned TRL/PEFT and a
-local 3B instruct checkpoint):
+SDS evaluation now (legacy schema; this does not modify SDS):
 
-  python scripts/prepare_grpo_data.py \
-    --input /data/vdt/summaries.jsonl \
-    --output_dir results/grpo_splits \
+  CUDA_VISIBLE_DEVICES=0 python3 scripts/generate_summaries.py \
+    --model outputs/grpo_fft_base_maxsteps5000/final_model \
+    --input_jsonl /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
+    --output outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+    --summary_col grpo_sum \
+    --batch_size 1 \
+    --max_new_tokens 256 \
+    --max_input_tokens 4096
+
+  python3 -m src.evaluate.run_eval \
+    --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+    --source_col source \
+    --summary_col grpo_sum \
+    --reference_col human_sum \
+    --metrics factcc minicheck alignscore rouge \
+    --factcc_model_path models/factcc \
+    --hf_cache_dir models/hf-cache \
+    --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
+    --alignscore_backbone_path models/roberta-base \
+    --nltk_data_dir models/nltk_data \
+    --offline \
+    --batch_size 1 \
+    --output results/sds_grpo_fft_scored.jsonl
+
+If the earlier baseline output has the same IDs plus `human_sum` and `llm_sum`,
+add `--existing_jsonl results/baseline.jsonl` to the generation command and
+evaluate both with `--summary_cols llm_sum grpo_sum`.
+
+Prepare SDS for a later train/validation/test experiment. The legacy columns
+are explicitly named here: `id`, `input`, and `human_sum`. The original SDS
+file is read-only; all generated files stay under this repository:
+
+  python3 scripts/prepare_grpo_data.py \
+    --input /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
+    --source_col input \
+    --reference_col human_sum \
+    --output_dir results/sds_grpo_splits \
     --validation_fraction 0.1 \
     --test_fraction 0.1 \
     --seed 42
 
-  python -m src.training.train_grpo \
+Review `results/sds_grpo_splits/data_manifest.json` before training. Use only
+`train.jsonl` for updates, `validation.jsonl` for model selection, and keep
+`test.jsonl` untouched until the final comparison.
+
+All experiments below use the same split, seed, one-epoch budget, explicit
+validation file, TensorBoard logging, and unique output directories. Run them
+separately; do not reuse an output directory. They require IT-provisioned
+TRL 1.9.2, PEFT, TensorBoard, and (for the first two) vLLM.
+
+Experiment A: LoRA + FactCC + reference reward (recommended first treatment):
+
+  python3 -m src.training.train_grpo \
     --model models/Llama-3.2-3B-Instruct \
-    --train_jsonl results/grpo_splits/train.jsonl \
-    --output_dir outputs/grpo_lora_minicheck_001 \
-    --faithfulness_metrics minicheck \
-    --hf_cache_dir models/hf-cache \
-    --internal_validation_fraction 0.1 \
+    --train_jsonl results/sds_grpo_splits/train.jsonl \
+    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+    --output_dir outputs/sds_lora_factcc_001 \
+    --faithfulness_metrics factcc \
+    --factcc_model_path models/factcc \
+    --reward_device cpu \
+    --reward_batch_size 4 \
+    --reference_weight 0.25 \
+    --metric_weights 1.0 \
     --num_generations 4 \
     --num_generations_eval 1 \
+    --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
-    --reference_weight 0.25 \
+    --num_train_epochs 1 \
+    --max_completion_length 256 \
     --eval_strategy epoch \
+    --save_strategy steps \
+    --save_steps 50 \
+    --max_checkpoints 2 \
+    --logging_steps 1 \
     --report_to tensorboard \
-    --run_name grpo-lora-minicheck-001 \
-    --ablation lora-minicheck-plus-reference \
+    --run_name sds-lora-factcc-001 \
+    --experiment_name sds-grpo-comparison \
+    --ablation lora-factcc-plus-reference \
+    --tag sds --tag lora --tag factcc \
+    --notes "Legacy SDS; explicit validation split; one epoch." \
     --finetuning_method lora \
     --lora_r 16 \
     --lora_alpha 32 \
     --use_vllm \
     --vllm_mode colocate \
     --vllm_gpu_memory_utilization 0.25 \
+    --precision bf16 \
     --seed 42
 
-The input file's reference-field name must match `--reference_col` (for
-example, the included sample uses `abstract_sum`; company data may use
-`human_sum`). For multiple same-schema JSONL files, list all paths after
-`--input`; they are combined before one grouped split, with per-file IDs
-namespaced. Only `train.jsonl` is used for training; validation/test stay held
-out. The pilot reward is exploratory for Vietnamese. See `GRPO_EXPERIMENT.md`.
+Experiment B: LoRA + MiniCheck + reference reward:
+
+  python3 -m src.training.train_grpo \
+    --model models/Llama-3.2-3B-Instruct \
+    --train_jsonl results/sds_grpo_splits/train.jsonl \
+    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+    --output_dir outputs/sds_lora_minicheck_001 \
+    --faithfulness_metrics minicheck \
+    --hf_cache_dir models/hf-cache \
+    --reward_device cpu \
+    --reward_batch_size 4 \
+    --reference_weight 0.25 \
+    --metric_weights 1.0 \
+    --num_generations 4 \
+    --num_generations_eval 1 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --num_train_epochs 1 \
+    --max_completion_length 256 \
+    --eval_strategy epoch \
+    --save_strategy steps \
+    --save_steps 50 \
+    --max_checkpoints 2 \
+    --logging_steps 1 \
+    --report_to tensorboard \
+    --run_name sds-lora-minicheck-001 \
+    --experiment_name sds-grpo-comparison \
+    --ablation lora-minicheck-plus-reference \
+    --tag sds --tag lora --tag minicheck \
+    --notes "Legacy SDS; same split and budget as FactCC treatment." \
+    --finetuning_method lora \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --use_vllm \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.25 \
+    --precision bf16 \
+    --seed 42
+
+Experiment C: reference-reward ablation (FactCC only):
+
+  python3 -m src.training.train_grpo \
+    --model models/Llama-3.2-3B-Instruct \
+    --train_jsonl results/sds_grpo_splits/train.jsonl \
+    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+    --output_dir outputs/sds_lora_factcc_no_reference_001 \
+    --faithfulness_metrics factcc \
+    --factcc_model_path models/factcc \
+    --reward_device cpu \
+    --reward_batch_size 4 \
+    --reference_weight 0.0 \
+    --metric_weights 1.0 \
+    --num_generations 4 \
+    --num_generations_eval 1 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --num_train_epochs 1 \
+    --max_completion_length 256 \
+    --eval_strategy epoch \
+    --save_strategy steps \
+    --save_steps 50 \
+    --max_checkpoints 2 \
+    --logging_steps 1 \
+    --report_to tensorboard \
+    --run_name sds-lora-factcc-no-reference-001 \
+    --experiment_name sds-grpo-comparison \
+    --ablation lora-factcc-no-reference \
+    --tag sds --tag lora --tag factcc --tag no-reference \
+    --notes "Ablation: disables human-reference overlap reward." \
+    --finetuning_method lora \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --use_vllm \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.25 \
+    --precision bf16 \
+    --seed 42
+
+Optional Experiment D: FFT + FactCC. This is much more expensive and should
+not share a directory with the existing FFT run:
+
+  python3 -m src.training.train_grpo \
+    --model models/Llama-3.2-3B-Instruct \
+    --train_jsonl results/sds_grpo_splits/train.jsonl \
+    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+    --output_dir outputs/sds_fft_factcc_001 \
+    --faithfulness_metrics factcc \
+    --factcc_model_path models/factcc \
+    --reward_device cpu \
+    --reward_batch_size 4 \
+    --reference_weight 0.25 \
+    --metric_weights 1.0 \
+    --num_generations 4 \
+    --num_generations_eval 1 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --num_train_epochs 1 \
+    --max_completion_length 256 \
+    --eval_strategy epoch \
+    --save_strategy steps \
+    --save_steps 50 \
+    --max_checkpoints 2 \
+    --logging_steps 1 \
+    --report_to tensorboard \
+    --run_name sds-fft-factcc-001 \
+    --experiment_name sds-grpo-comparison \
+    --ablation fft-factcc-plus-reference \
+    --tag sds --tag fft --tag factcc \
+    --notes "Full fine-tuning ablation; no colocated vLLM to reduce memory pressure." \
+    --finetuning_method fft \
+    --no-use_vllm \
+    --precision bf16 \
+    --seed 42
+
+After each run, generate validation summaries from the same validation rows,
+then score them with the same metrics and decoding settings. For LoRA use
+`final_adapter` plus `--base_model`; for FFT use `final_model` alone. Keep
+each generated column and scored file under a unique name. Create a report
+with `scripts/make_report.py --run_dir outputs/<run-name>` so the report
+includes the run manifest and training history. Keep `test.jsonl` untouched
+until the final frozen comparison. See `GRPO_EXPERIMENT.md` for the research
+limitations and reporting checklist.

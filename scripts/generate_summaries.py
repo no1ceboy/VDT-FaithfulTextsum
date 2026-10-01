@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate summaries from prepared rows or raw ``id/text/summary`` JSONL."""
+"""Generate summaries from prepared rows or raw canonical/legacy JSONL."""
 
 from __future__ import annotations
 
@@ -30,15 +30,29 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(row.get("prompt"), list):
                 validate_prepared_record(row)
             else:
-                source = row.get("text", row.get("source"))
-                reference = row.get("summary")
+                source = next(
+                    (
+                        value
+                        for field in ("text", "source", "input")
+                        if isinstance(value := row.get(field), str) and value.strip()
+                    ),
+                    None,
+                )
+                reference = next(
+                    (
+                        value
+                        for field in ("summary", "human_sum", "reference", "abstract_sum")
+                        if isinstance(value := row.get(field), str) and value.strip()
+                    ),
+                    None,
+                )
                 if not isinstance(source, str) or not source.strip():
                     raise ValueError(
-                        f"{path}:{line_number}: raw generation rows require a non-empty source field"
+                        f"{path}:{line_number}: raw generation rows require a non-empty text/source/input field"
                     )
                 if not isinstance(reference, str) or not reference.strip():
                     raise ValueError(
-                        f"{path}:{line_number}: raw generation rows require a non-empty summary field"
+                        f"{path}:{line_number}: raw generation rows require a non-empty summary/human_sum/reference field"
                     )
                 style = row.get("style")
                 if style is not None and not isinstance(style, str):
@@ -91,7 +105,7 @@ def main() -> int:
     parser.add_argument(
         "--input_jsonl",
         required=True,
-        help="Prepared JSONL, or raw canonical rows with id/text/summary",
+        help="Prepared JSONL, or raw id/text/summary or legacy id/input/human_sum rows",
     )
     parser.add_argument("--existing_jsonl", help="Optional prior generation output to merge by id")
     parser.add_argument("--output", required=True, help="New JSONL output compatible with scripts/run_eval.py")
