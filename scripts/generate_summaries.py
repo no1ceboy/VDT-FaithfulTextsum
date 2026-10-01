@@ -52,7 +52,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
                     )
                 if not isinstance(reference, str) or not reference.strip():
                     raise ValueError(
-                        f"{path}:{line_number}: raw generation rows require a non-empty summary/human_sum/reference field"
+                        f"{path}:{line_number}: raw generation rows require a non-empty summary/human_sum/reference/abstract_sum field"
                     )
                 style = row.get("style")
                 if style is not None and not isinstance(style, str):
@@ -105,7 +105,7 @@ def main() -> int:
     parser.add_argument(
         "--input_jsonl",
         required=True,
-        help="Prepared JSONL, or raw id/text/summary or legacy id/input/human_sum rows",
+        help="Prepared JSONL, or raw id/text/summary or legacy id/input/abstract_sum rows",
     )
     parser.add_argument("--existing_jsonl", help="Optional prior generation output to merge by id")
     parser.add_argument("--output", required=True, help="New JSONL output compatible with scripts/run_eval.py")
@@ -131,7 +131,16 @@ def main() -> int:
             raise ValueError(f"Input JSONL does not exist: {input_path}")
         if existing_path and not existing_path.is_file():
             raise ValueError(f"Existing generation JSONL does not exist: {existing_path}")
-        if args.summary_col in {"id", "input", "source", "human_sum", "reference"}:
+        if args.summary_col in {
+            "id",
+            "input",
+            "text",
+            "source",
+            "summary",
+            "human_sum",
+            "reference",
+            "abstract_sum",
+        }:
             raise ValueError("summary_col must not replace a reserved id/source/reference column")
         if output_path.exists():
             raise FileExistsError(f"Refusing to replace existing output: {output_path}")
@@ -150,7 +159,10 @@ def main() -> int:
             for row in rows:
                 old = existing[str(row["id"])]
                 old_source = old.get("text", old.get("source", old.get("input")))
-                old_reference = old.get("human_sum", old.get("reference"))
+                old_reference = old.get(
+                    "human_sum",
+                    old.get("reference", old.get("abstract_sum", old.get("summary"))),
+                )
                 if old_source != row["source"] or old_reference != row["reference"]:
                     raise ValueError(f"Existing row {row['id']!r} has a different source or human reference")
                 if args.summary_col in old:

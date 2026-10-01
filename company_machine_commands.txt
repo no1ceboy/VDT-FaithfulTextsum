@@ -53,18 +53,19 @@ SDS evaluation now (legacy schema; this does not modify SDS):
     --batch_size 1 \
     --output results/sds_grpo_fft_scored.jsonl
 
-If the earlier baseline output has the same IDs plus `human_sum` and `llm_sum`,
-add `--existing_jsonl results/baseline.jsonl` to the generation command and
-evaluate both with `--summary_cols llm_sum grpo_sum`.
+If the earlier baseline output has the same IDs plus `abstract_sum` and
+`llm_sum`, add `--existing_jsonl results/baseline.jsonl` to the generation
+command. Because that preserves the legacy reference column, evaluate both
+with `--summary_cols llm_sum grpo_sum --reference_col abstract_sum`.
 
 Prepare SDS for a later train/validation/test experiment. The legacy columns
-are explicitly named here: `id`, `input`, and `human_sum`. The original SDS
+are explicitly named here: `id`, `input`, and `abstract_sum`. The original SDS
 file is read-only; all generated files stay under this repository:
 
   python3 scripts/prepare_grpo_data.py \
     --input /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
     --source_col input \
-    --reference_col human_sum \
+    --reference_col abstract_sum \
     --output_dir results/sds_grpo_splits \
     --validation_fraction 0.1 \
     --test_fraction 0.1 \

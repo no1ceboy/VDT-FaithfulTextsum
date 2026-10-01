@@ -14,7 +14,7 @@ class GenerateSummariesTests(unittest.TestCase):
             path = Path(temporary) / "legacy.jsonl"
             path.write_text(
                 json.dumps(
-                    {"id": "sds-1", "input": "Nguồn văn bản.", "human_sum": "Tóm tắt."},
+                    {"id": "sds-1", "input": "Nguồn văn bản.", "abstract_sum": "Tóm tắt."},
                     ensure_ascii=False,
                 )
                 + "\n",
