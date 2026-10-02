@@ -8,6 +8,35 @@ Extract MiniCheck into the existing cache (the ZIP has files at its root):
 
   python -m zipfile -e VDT-FaithfulTextsum-MiniCheck-Flan-T5-Large.zip models/hf-cache
 
+Clean the loaded batch_3 dataset before training or generation. This writes a
+new file, leaves the original unchanged, and writes the report/audit under
+`results/`. The legacy fields are `input` and `output`:
+
+  python3 -m src.data.clean_dataset \
+    --input data/batch_3.jsonl \
+    --output data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --reference_col output \
+    --drop_stale_token_lengths \
+    --report results/batch_3_cleaning.json \
+    --audit_log results/batch_3_cleaning.audit.jsonl
+
+The cleaner replaces links with `[URL]`, removes decorative icons and
+separator lines, and drops empty/corrupted source rows. Do not add
+`--overwrite` on the first run; add it only when intentionally rerunning the
+same output path.
+
+Use `data/batch_3_cleaned.jsonl` below as the input for later preparation:
+
+  python3 scripts/prepare_grpo_data.py \
+    --input data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --reference_col output \
+    --output_dir results/batch_3_grpo_splits \
+    --validation_fraction 0.1 \
+    --test_fraction 0.1 \
+    --seed 42
+
 10-record evaluation smoke test (auto-detects canonical `text`/`summary` or legacy fields):
 
   python -m src.evaluate.run_eval \
