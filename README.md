@@ -79,6 +79,30 @@ python scripts/make_report.py --input results/baseline.jsonl --output results/ba
 
 The report includes mean/median/standard deviation, valid/missing counts, inline score bars, text-length checks, and the adjacent machine-readable JSON. Add `--run_dir outputs/grpo_lora_minicheck_001` to include the training manifest and recent training history. TensorBoard remains the detailed training visualization when the company environment provides it.
 
+## Claim-level behavior audit
+
+The scalar evaluators are useful for comparison, but they do not show which
+claim failed. `src.evaluate.fact_audit` deterministically splits summaries into
+claim-like units, retrieves likely source evidence with lexical overlap, and
+optionally scores each full-source/claim pair with Vietnamese mFACT. It writes
+one JSONL row per claim plus `.summary.tsv` and `.summary.json` aggregates.
+Retrieved evidence is a review aid, not proof of entailment; `needs_review` is
+not an automatic contradiction label.
+
+```text
+python -m src.evaluate.fact_audit \
+  --data results/grpo_test_compare.jsonl \
+  --source_col input \
+  --summary_cols human_sum base_sum grpo_sum \
+  --mfact_model_path models/mfact-vi_VN \
+  --device cpu --batch_size 1 --top_k 3 --limit 20 \
+  --offline --output results/grpo_claim_audit.jsonl
+```
+
+Use `--no_mfact` for extraction/retrieval-only debugging. Compare the same
+documents across systems and manually label flagged claims before treating the
+aggregate rates as evidence of a real Vietnamese faithfulness gap.
+
 ## Reading the scores
 
 The source-based factuality models were developed mainly for English. mFACT-vi_VN is the Vietnamese-specific classifier in this repository, but it was trained from translated/silver faithfulness data rather than your company’s human labels. Treat all automatic scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific.
