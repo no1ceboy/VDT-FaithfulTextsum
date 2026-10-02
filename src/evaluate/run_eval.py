@@ -278,6 +278,17 @@ def _build_registry(args: argparse.Namespace) -> dict[str, Any]:
             batch_size=args.batch_size,
             evaluation_mode=args.alignscore_mode,
         )
+    if "mfact" in args.metrics:
+        from .mfact_eval import MFactEvaluator
+
+        registry["mfact"] = partial(
+            MFactEvaluator,
+            device=device,
+            model_path=str(_project_path(args.mfact_model_path))
+            if args.mfact_model_path
+            else None,
+            batch_size=args.batch_size,
+        )
     if "qafacteval" in args.metrics:
         from .qafacteval_eval import QAFactEvalEvaluator
 
@@ -413,7 +424,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metrics",
         nargs="+",
-        choices=["factcc", "fenice", "minicheck", "alignscore", "qafacteval", "rouge", "bertscore"],
+        choices=[
+            "factcc",
+            "fenice",
+            "minicheck",
+            "alignscore",
+            "mfact",
+            "qafacteval",
+            "rouge",
+            "bertscore",
+        ],
         default=None,
     )
     parser.add_argument(
@@ -452,6 +472,11 @@ def parse_args() -> argparse.Namespace:
         help="Local roberta-base model/tokenizer folder paired with AlignScore-base",
     )
     parser.add_argument("--alignscore_mode", default="nli_sp", choices=["nli_sp", "nli", "bin_sp", "bin"])
+    parser.add_argument(
+        "--mfact_model_path",
+        default="models/mfact-vi_VN",
+        help="Local mFACT-vi_VN model directory; relative paths resolve from the project root",
+    )
     parser.add_argument("--qafacteval_model_path", default="./models", help="Local QAFactEval model folder from download_models.sh")
     parser.add_argument(
         "--hf_cache_dir",
@@ -539,6 +564,35 @@ def main() -> int:
         args.hf_cache_dir = str(_hf_cache_root(args.hf_cache_dir))
         os.environ["HF_HUB_CACHE"] = args.hf_cache_dir
         os.environ["HUGGINGFACE_HUB_CACHE"] = args.hf_cache_dir
+
+    if "mfact" in args.metrics:
+        mfact_dir = _project_path(args.mfact_model_path)
+        if not mfact_dir.is_dir():
+            raise FileNotFoundError(
+                f"mFACT model directory not found: {mfact_dir}. Extract mFACT-vi_VN "
+                "under models/mfact-vi_VN or pass --mfact_model_path."
+            )
+        has_config = (mfact_dir / "config.json").is_file()
+        has_weights = any(
+            (mfact_dir / name).is_file()
+            for name in (
+                "pytorch_model.bin",
+                "model.safetensors",
+                "pytorch_model.bin.index.json",
+                "model.safetensors.index.json",
+            )
+        )
+        has_tokenizer = any(
+            (mfact_dir / name).is_file()
+            for name in ("tokenizer.json", "vocab.txt", "tokenizer.model")
+        )
+        if not has_config or not has_weights or not has_tokenizer:
+            raise FileNotFoundError(
+                f"{mfact_dir} is not a complete mFACT model root. It must directly contain "
+                "config.json, model weights, and tokenizer files. If extraction added a "
+                "nested folder, point --mfact_model_path at that inner folder."
+            )
+        args.mfact_model_path = str(mfact_dir)
 
     if args.nltk_data_dir:
         nltk_data_dir = _nltk_data_root(str(_project_path(args.nltk_data_dir)))

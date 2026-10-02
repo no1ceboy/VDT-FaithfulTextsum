@@ -14,7 +14,7 @@ Report at least these comparisons on the same untouched test set:
 4. Optional SFT warm-start, if run.
 5. The human reference as a descriptive baseline, not as perfect truth.
 
-Report each metric separately, output length and coverage checks, and a blinded human review of source-supported claims. Do not claim improved Vietnamese faithfulness from a metric-score increase alone. The included FactCC, MiniCheck and AlignScore adapters are not validated or calibrated for Vietnamese; the metric reward is therefore an experimental treatment that needs human validation.
+Report each metric separately, output length and coverage checks, and a blinded human review of source-supported claims. Do not claim improved Vietnamese faithfulness from a metric-score increase alone. The included FactCC, MiniCheck and AlignScore adapters are not validated or calibrated for Vietnamese; mFACT-vi_VN is the Vietnamese-specific option, but it was trained from translated/silver faithfulness data and still needs human validation.
 
 ## Model and company-machine constraints
 
@@ -153,7 +153,7 @@ python -m src.training.train_grpo --model models/Llama-3.2-3B-Instruct --train_j
 ## Reward definitions and limitations
 
 - `reference_char_reward`: whitespace-insensitive, Unicode NFC-normalized character n-gram F-beta (orders 1–6, beta 2). It is an explicitly named chrF-style proxy, not the canonical SacreBLEU chrF metric. It rewards surface overlap, can discourage valid paraphrases, and can reward copying while failing to detect unsupported claims.
-- FactCC, MiniCheck, or AlignScore: existing project evaluator adapter, called on `(source, generated summary)`. Non-finite scores become zero and values are clipped to `[0, 1]` before entering GRPO. Clipping is only a common numeric bound; it does not calibrate or make the different metrics comparable.
+- FactCC, MiniCheck, AlignScore, or mFACT: existing project evaluator adapter, called on `(source, generated summary)`. Non-finite scores become zero and values are clipped to `[0, 1]` before entering GRPO. Clipping is only a common numeric bound; it does not calibrate or make the different metrics comparable. Select Vietnamese mFACT with `--faithfulness_metrics mfact --mfact_model_path models/mfact-vi_VN` and record it as a separate treatment.
 - The human reference is neither a factual oracle nor a complete set of valid summaries. A single reference encourages its wording and content selection. Use several references if available, report human review, and include coverage/omission analysis alongside factual support.
 - Reward models are not differentiable through their text scores; GRPO uses sampled output rewards. Metric quality, prompt length, sampling temperature, and number of generations all affect the optimization signal.
 - B200 GPU capacity does not fix metric language bias. Validate the selected metric against Vietnamese expert labels before treating it as a reward suitable for a claim about factuality.

@@ -81,6 +81,7 @@ def make_metric_reward(
     *,
     device: str = "cpu",
     factcc_model_path: str | None = None,
+    mfact_model_path: str | None = None,
     hf_cache_dir: str | None = None,
     alignscore_ckpt: str | None = None,
     alignscore_backbone_path: str | None = None,
@@ -101,6 +102,16 @@ def make_metric_reward(
                 from ..evaluate.factcc_eval import FactCCEvaluator
 
                 evaluator = FactCCEvaluator(device=device, model_path=factcc_model_path, batch_size=batch_size)
+            elif metric_name == "mfact":
+                if not mfact_model_path:
+                    raise ValueError("mFACT requires --mfact_model_path pointing to a local checkpoint")
+                from ..evaluate.mfact_eval import MFactEvaluator
+
+                evaluator = MFactEvaluator(
+                    device=device,
+                    model_path=mfact_model_path,
+                    batch_size=batch_size,
+                )
             elif metric_name == "minicheck":
                 from ..evaluate.minicheck_eval import MiniCheckEvaluator
 

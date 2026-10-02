@@ -53,8 +53,18 @@ def _parse_args() -> argparse.Namespace:
         help="Hold out this fraction from --train_jsonl by normalized source groups when --eval_jsonl is absent",
     )
     parser.add_argument("--output_dir", required=True, help="Unique run directory inside this repository")
-    parser.add_argument("--faithfulness_metrics", nargs="+", choices=("factcc", "minicheck", "alignscore"), required=True)
+    parser.add_argument(
+        "--faithfulness_metrics",
+        nargs="+",
+        choices=("factcc", "minicheck", "alignscore", "mfact"),
+        required=True,
+    )
     parser.add_argument("--factcc_model_path", help="Local FactCC checkpoint directory")
+    parser.add_argument(
+        "--mfact_model_path",
+        default="models/mfact-vi_VN",
+        help="Local Vietnamese mFACT-vi_VN model directory",
+    )
     parser.add_argument(
         "--alignscore_ckpt",
         default="models/alignscore/AlignScore-base.ckpt",
@@ -218,6 +228,8 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Pat
             raise ValueError("--faithfulness_metrics factcc requires --factcc_model_path")
         if metric == "alignscore" and not args.alignscore_ckpt:
             raise ValueError("--faithfulness_metrics alignscore requires --alignscore_ckpt")
+        if metric == "mfact" and not args.mfact_model_path:
+            raise ValueError("--faithfulness_metrics mfact requires --mfact_model_path")
     if len(set(args.faithfulness_metrics)) != len(args.faithfulness_metrics):
         raise ValueError("Each faithfulness metric may appear only once")
     metric_weights = args.metric_weights or [1.0] * len(args.faithfulness_metrics)
@@ -276,6 +288,36 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Pat
         if not factcc_path.is_dir():
             raise ValueError("--factcc_model_path must be an existing local model directory")
         args.factcc_model_path = str(factcc_path)
+    if "mfact" in args.faithfulness_metrics:
+        mfact_path = _resolve_path(args.mfact_model_path)
+        if not mfact_path.is_dir():
+            raise ValueError("--mfact_model_path must be an existing local model directory")
+        missing_assets = [] if (mfact_path / "config.json").is_file() else ["config.json"]
+        has_weights = any(
+            (mfact_path / name).is_file()
+            for name in (
+                "pytorch_model.bin",
+                "model.safetensors",
+                "pytorch_model.bin.index.json",
+                "model.safetensors.index.json",
+            )
+        )
+        has_tokenizer = any(
+            (mfact_path / name).is_file()
+            for name in ("tokenizer.json", "vocab.txt", "tokenizer.model")
+        )
+        if not has_weights:
+            missing_assets.append("model weights")
+        if not has_tokenizer:
+            missing_assets.append("tokenizer files")
+        # Aggregate entries above are checked separately because a checkpoint
+        # may use either safetensors or PyTorch weights.
+        if missing_assets:
+            raise ValueError(
+                f"Incomplete local mFACT model directory {mfact_path}; missing: "
+                + ", ".join(missing_assets)
+            )
+        args.mfact_model_path = str(mfact_path)
     if "alignscore" in args.faithfulness_metrics:
         checkpoint_path = _resolve_path(args.alignscore_ckpt)
         if not checkpoint_path.is_file():
@@ -514,6 +556,7 @@ def main() -> int:
                 metric,
                 device=args.reward_device,
                 factcc_model_path=args.factcc_model_path,
+                mfact_model_path=args.mfact_model_path,
                 hf_cache_dir=args.hf_cache_dir,
                 alignscore_ckpt=args.alignscore_ckpt,
                 alignscore_backbone_path=args.alignscore_backbone_path,
@@ -652,6 +695,7 @@ def main() -> int:
             "metric_batch_size": args.reward_batch_size,
             "metric_checkpoints": {
                 "factcc": str(Path(args.factcc_model_path).expanduser().resolve()) if args.factcc_model_path else None,
+                "mfact_model": str(Path(args.mfact_model_path).expanduser().resolve()) if args.mfact_model_path else None,
                 "minicheck_model": "flan-t5-large",
                 "hf_cache_dir": str(Path(args.hf_cache_dir).expanduser().resolve()) if args.hf_cache_dir else None,
                 "alignscore_ckpt": str(Path(args.alignscore_ckpt).expanduser().resolve()) if args.alignscore_ckpt else None,

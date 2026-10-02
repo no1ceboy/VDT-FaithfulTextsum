@@ -27,9 +27,12 @@ Transfer model files to the company machine before running. The required layout 
 | FactCC | A local Transformers checkpoint under `models/factcc` |
 | MiniCheck | Its Hugging Face snapshot in `models/hf-cache/` (or a directly extracted MiniCheck model folder there) |
 | AlignScore | `models/alignscore/AlignScore-base.ckpt` plus matching RoBERTa-base weights/tokenizer/config, either in `models/roberta-base/` or as a complete snapshot in `models/hf-cache/`; plus NLTK `punkt_tab` data |
+| mFACT | The complete Vietnamese `mFACT-vi_VN` Transformers folder under `models/mfact-vi_VN` |
 | FENICE | `Babelscape/t5-base-summarization-claim-extractor` and `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` in the Hugging Face cache; upstream FENICE uses fixed model IDs and has no direct checkpoint-path option |
 | QAFactEval | The directory tree produced by its upstream `download_models.sh`, passed with `--qafacteval_model_path` |
 | BERTScore | A complete local encoder/tokenizer folder passed with `--bertscore_model_path`; for Vietnamese, start with `bert-base-multilingual-cased` and layer 9 |
+
+mFACT is opt-in because it requires its own approximately 715 MB checkpoint. Enable it with `--metrics ... mfact --mfact_model_path models/mfact-vi_VN`; the model folder must directly contain `config.json`, model weights, and tokenizer files. It uses the existing PyTorch/Transformers dependencies and does not use the MiniCheck cache.
 
 ROUGE-1, ROUGE-2, and ROUGE-L are included as a small standard-library implementation. BERTScore uses the existing PyTorch/Transformers stack directly, so it does not require installing the separate `bert-score` package; it does require transferring the full encoder/tokenizer checkpoint. Its output is raw, unrescaled precision/recall/F1 with uniform token weights, and may differ slightly from the upstream `bert-score` package. Record the checkpoint and layer with results.
 
@@ -66,6 +69,8 @@ python -m src.evaluate.run_eval --data /data/vdt/summaries.jsonl --offline --nlt
 
 The default run selects `human_sum` and `llm_sum` from the paired schema, scores them with FactCC, MiniCheck, and AlignScore, and adds ROUGE when the human reference is present. For a canonical `source`/`summary` file, the default run scores `summary` with the source-based metrics; reference metrics need a separate generated candidate. FactCC, AlignScore, RoBERTa, and MiniCheck assets are resolved from their standard `models/` folders above. The command adds separate score fields; `llm_sum__rouge_score` is ROUGE-L F1. BERTScore is not included until its separate model checkpoint has been uploaded; to enable it, extract a complete multilingual BERT folder to `models/bert-base-multilingual-cased`, add `bertscore` to `--metrics`, and add `--bertscore_model_path models/bert-base-multilingual-cased`. The human summary has null ROUGE/BERTScore values because it is the reference. The `.summary.tsv` reports each summary-column/metric mean and valid count. Legacy datasets with an `abstract_sum` column remain supported.
 
+For Vietnamese-specific faithfulness, add mFACT explicitly: `--metrics factcc minicheck alignscore mfact` and `--mfact_model_path models/mfact-vi_VN`. It returns `mfact_score` as the released classifier's class-1 faithful probability and `mfact_pred` at a 0.5 threshold. Keep this separate from the English-oriented metrics during analysis; it is still a silver-data research metric and needs human validation.
+
 Inspect the small-slice results, then rerun the same command without `--limit 10` for the full dataset. The CLI accepts `--summary_col` for a single summary field; `--summary_cols` evaluates several fields in one run while loading each metric once. Create a dependency-free HTML visualization and JSON aggregate from scored JSONL with:
 
 ```text
@@ -76,7 +81,7 @@ The report includes mean/median/standard deviation, valid/missing counts, inline
 
 ## Reading the scores
 
-The source-based factuality models were developed mainly for English. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific. Treat Vietnamese scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness.
+The source-based factuality models were developed mainly for English. mFACT-vi_VN is the Vietnamese-specific classifier in this repository, but it was trained from translated/silver faithfulness data rather than your company’s human labels. Treat all automatic scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific.
 
 The source-based metrics measure factual support; ROUGE and BERTScore instead measure similarity to the human reference. None alone establish factual faithfulness, coverage, relevance, readability, or whether important details were omitted. These scores are exploratory on Vietnamese; validate them against human labels before drawing research conclusions.
 
@@ -90,5 +95,6 @@ The optional [SFT + GRPO pilot](GRPO_EXPERIMENT.md) uses the human summary only 
 - FENICE: Scirè et al., 2024, [official repository](https://github.com/Babelscape/FENICE)
 - MiniCheck: Tang et al., 2024, [official repository](https://github.com/Liyan06/MiniCheck)
 - AlignScore: Zha et al., 2023, [official repository](https://github.com/yuh-zha/AlignScore)
+- mFACT: Qiu et al., 2023, [official repository](https://github.com/yfqiu-nlp/mfact-summ) and [Vietnamese checkpoint](https://huggingface.co/yfqiu-nlp/mFACT-vi_VN)
 - QAFactEval: Fabbri et al., 2022, [official repository](https://github.com/salesforce/QAFactEval)
 - BERTScore: Zhang et al., 2020, [official implementation](https://github.com/Tiiiger/bert_score)

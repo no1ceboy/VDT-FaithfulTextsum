@@ -53,6 +53,19 @@ SDS evaluation now (legacy schema; this does not modify SDS):
     --batch_size 1 \
     --output results/sds_grpo_fft_scored.jsonl
 
+Vietnamese mFACT evaluation (optional; upload the complete model folder first):
+
+  python3 -m src.evaluate.run_eval \
+    --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+    --source_col source \
+    --summary_col grpo_sum \
+    --reference_col human_sum \
+    --metrics mfact rouge \
+    --mfact_model_path models/mfact-vi_VN \
+    --offline \
+    --batch_size 1 \
+    --output results/sds_grpo_fft_mfact_scored.jsonl
+
 If the earlier baseline output has the same IDs plus `abstract_sum` and
 `llm_sum`, add `--existing_jsonl results/baseline.jsonl` to the generation
 command. Because that preserves the legacy reference column, evaluate both

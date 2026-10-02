@@ -317,6 +317,20 @@ class GrpoRewardTests(unittest.TestCase):
             batch_size=4,
         )
 
+    def test_mfact_reward_passes_local_vietnamese_checkpoint(self) -> None:
+        model_path = "models/mfact-vi_VN"
+        with patch("src.evaluate.mfact_eval.MFactEvaluator") as evaluator_type:
+            evaluator_type.return_value.evaluate.return_value = [{"mfact_score": 0.8}]
+            reward = make_metric_reward("mfact", mfact_model_path=model_path)
+            scores = reward(["summary"], source=["source"])
+
+        self.assertEqual(scores, [0.8])
+        evaluator_type.assert_called_once_with(
+            device="cpu",
+            model_path=model_path,
+            batch_size=4,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
