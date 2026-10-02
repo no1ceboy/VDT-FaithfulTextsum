@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.evaluate._alignscore_compat import (
+    AlignScoreCompatScorer,
     _AlignScoreModel,
     _aggregate_sentence_scores,
     _group_source_sentences,
@@ -16,6 +17,61 @@ from src.evaluate._alignscore_compat import (
 
 
 class AlignScoreCompatibilityTests(unittest.TestCase):
+    def test_fast_tokenizer_long_claim_uses_truncation_fallback(self) -> None:
+        import torch
+        from tokenizers import Tokenizer, models, pre_tokenizers, processors
+        from transformers import PreTrainedTokenizerFast
+
+        # Exercise the real fast-tokenizer exception without downloading assets.
+        core = Tokenizer(models.WordLevel(
+            {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2, "[PAD]": 3, "source": 4, "claim": 5},
+            unk_token="[UNK]",
+        ))
+        core.pre_tokenizer = pre_tokenizers.Whitespace()
+        core.post_processor = processors.TemplateProcessing(
+            single="[CLS] $A [SEP]",
+            pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+            special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
+        )
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=core, unk_token="[UNK]", cls_token="[CLS]",
+            sep_token="[SEP]", pad_token="[PAD]", model_max_length=16,
+        )
+        scorer = AlignScoreCompatScorer.__new__(AlignScoreCompatScorer)
+        scorer.tokenizer = tokenizer
+        scorer.max_length = 16
+        scorer.batch_size = 1
+        scorer.device = torch.device("cpu")
+        scorer.model = MagicMock(return_value=(
+            torch.zeros((1, 2)), torch.zeros((1, 3)), torch.zeros((1, 1)),
+        ))
+
+        with self.assertRaises(Exception) as failure:
+            tokenizer("source " * 4, "claim " * 30, truncation="only_first", max_length=16)
+        self.assertIn("Sequence to truncate too short", str(failure.exception))
+        self.assertNotIsInstance(failure.exception, ValueError)
+
+        with self.assertLogs("src.evaluate._alignscore_compat", level="WARNING") as logs:
+            nli_scores, binary_scores = scorer._predict_pairs(["source " * 4], ["claim " * 30])
+
+        self.assertAlmostEqual(nli_scores[0], 1 / 3)
+        self.assertAlmostEqual(binary_scores[0], 1 / 2)
+        encoded = scorer.model.call_args.args[0]
+        self.assertEqual(tuple(encoded["input_ids"].shape), (1, 16))
+        self.assertIn("summary may also be truncated", logs.output[0])
+
+    def test_unrelated_tokenizer_errors_are_not_retried(self) -> None:
+        for error in (Exception("broken tokenizer"), ValueError("invalid input")):
+            with self.subTest(error=type(error).__name__):
+                scorer = AlignScoreCompatScorer.__new__(AlignScoreCompatScorer)
+                scorer.tokenizer = MagicMock(side_effect=error)
+                scorer.max_length = 16
+                scorer.batch_size = 1
+                with self.assertRaises(type(error)) as failure:
+                    scorer._predict_pairs(["source"], ["claim"])
+                self.assertIs(failure.exception, error)
+                self.assertEqual(scorer.tokenizer.call_count, 1)
+
     def test_alignscore_model_initializes_from_local_pretrained_roberta(self) -> None:
         config = SimpleNamespace(hidden_size=4)
         base_model = MagicMock()

@@ -260,7 +260,18 @@ class AlignScoreCompatScorer:
                     max_length=self.max_length,
                     return_tensors="pt",
                 )
-            except ValueError:
+            except Exception as exc:
+                # The fast tokenizer raises a plain Exception, not ValueError,
+                # if shortening only the source cannot accommodate the claim.
+                # Do not hide unrelated tokenizer failures.
+                if "sequence to truncate too short" not in str(exc).lower():
+                    raise
+                logger.warning(
+                    "AlignScore pairs %d:%d cannot fit within %d tokens by truncating "
+                    "only the source. Retrying with longest_first truncation; the "
+                    "summary may also be truncated, so scores cover retained text only.",
+                    start, end, self.max_length,
+                )
                 # Match upstream's fallback when the claim itself exceeds the limit.
                 encoded = self.tokenizer(
                     list(contexts[start:end]),
