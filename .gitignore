@@ -46,6 +46,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+*.zip
 
 # Jupyter
 .ipynb_checkpoints/

@@ -18,6 +18,33 @@ Here, `summary` is the human reference used to prepare SFT/GRPO data. The origin
 
 The evaluator and preparer auto-detect `text`/`summary`, then `source`/`summary`, then the legacy `input`/`human_sum` names. Use explicit `--source_col`, `--summary_col`, or `--reference_col` when a file contains several candidate columns.
 
+### Clean a dataset without changing the original
+
+For web-style Vietnamese documents, run the dependency-free cleaner before
+training or generation. It writes a separate JSONL, replaces opaque URLs with
+`[URL]`, removes decorative icons and separator lines, and drops rows with an
+empty source or the Unicode replacement character (`�`). The reference summary
+is preserved exactly by default. A JSON report and per-row audit log record
+every changed or dropped row.
+
+This also supports the legacy `id/input/output` layout. For example:
+
+```text
+python -m src.data.clean_dataset \
+  --input data/batch_3.jsonl \
+  --output data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --reference_col output \
+  --drop_stale_token_lengths \
+  --report results/batch_3_cleaning.json \
+  --audit_log results/batch_3_cleaning.audit.jsonl
+```
+
+The input file is never edited in place. Use `--clean_reference` only when
+you intentionally want the same formatting cleanup applied to reference
+summaries. `--drop_stale_token_lengths` removes a pre-cleaning
+`qwen3_token_length` field instead of leaving misleading metadata.
+
 ## Local models and offline runs
 
 Transfer model files to the company machine before running. The required layout depends on the metric:
@@ -42,7 +69,7 @@ The included MiniCheck FLAN-T5 adapter and AlignScore adapter can run together. 
 
 ## Package layout and CLI
 
-Reusable code lives in `src/evaluate/` and `src/training/`. From the repository root, launch evaluation with `python -m src.evaluate.run_eval`; no project installation or custom `PYTHONPATH` is needed. The `scripts/run_eval.py` file remains a convenience wrapper. Running from source does not require installing this project.
+Reusable code lives in `src/data/`, `src/evaluate/`, and `src/training/`. From the repository root, launch evaluation with `python -m src.evaluate.run_eval`; launch cleaning with `python -m src.data.clean_dataset`. No project installation or custom `PYTHONPATH` is needed. The `scripts/run_eval.py` file remains a convenience wrapper. Running from source does not require installing this project.
 
 The public source repository is [github.com/no1ceboy/VDT-FaithfulTextsum](https://github.com/no1ceboy/VDT-FaithfulTextsum). Model weights, the Hugging Face cache, and NLTK data are not tracked; transfer those separately and keep the archive layout described above. The optional SFT/GRPO code also requires an IT-provisioned training environment; see `GRPO_EXPERIMENT.md`. Do not install packages on the company machine unless IT approves it.
 
@@ -78,6 +105,30 @@ python scripts/make_report.py --input results/baseline.jsonl --output results/ba
 ```
 
 The report includes mean/median/standard deviation, valid/missing counts, inline score bars, text-length checks, and the adjacent machine-readable JSON. Add `--run_dir outputs/grpo_lora_minicheck_001` to include the training manifest and recent training history. TensorBoard remains the detailed training visualization when the company environment provides it.
+
+## Claim-level behavior audit
+
+The scalar evaluators are useful for comparison, but they do not show which
+claim failed. `src.evaluate.fact_audit` deterministically splits summaries into
+claim-like units, retrieves likely source evidence with lexical overlap, and
+optionally scores each full-source/claim pair with Vietnamese mFACT. It writes
+one JSONL row per claim plus `.summary.tsv` and `.summary.json` aggregates.
+Retrieved evidence is a review aid, not proof of entailment; `needs_review` is
+not an automatic contradiction label.
+
+```text
+python -m src.evaluate.fact_audit \
+  --data results/grpo_test_compare.jsonl \
+  --source_col input \
+  --summary_cols human_sum base_sum grpo_sum \
+  --mfact_model_path models/mfact-vi_VN \
+  --device cpu --batch_size 1 --top_k 3 --limit 20 \
+  --offline --output results/grpo_claim_audit.jsonl
+```
+
+Use `--no_mfact` for extraction/retrieval-only debugging. Compare the same
+documents across systems and manually label flagged claims before treating the
+aggregate rates as evidence of a real Vietnamese faithfulness gap.
 
 ## Reading the scores
 
