@@ -196,6 +196,39 @@ non-proposition). The page's automatic flags and retrieval scores are review
 aids only; they are not human labels. Click **Download completed JSONL** when
 finished and keep the resulting file under `results/` for analysis.
 
+### LLM-assisted claim judgment
+
+The repository also supports a second-rater pass over the review JSONL. It
+uses the same five labels and writes `llm_label`, `llm_reason`,
+`llm_evidence_quote`, and `llm_confidence`; it never overwrites
+`human_label`. Gemini uses the standard-library HTTP client, so this path does
+not require installing the Google SDK. The configured model is
+`gemini-3.5-flash-lite`.
+
+The Gemini backend sends the source document and claim to Google's API. Use it
+only when that data transfer is approved for the dataset. Keep the key in an
+environment variable, never in a command file or JSONL:
+
+```text
+python -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --limit 1 --overwrite
+```
+
+The `--limit 1` call is a safe smoke test. Remove it for all 415 claim rows;
+use `--resume` if a long run is interrupted. The API output is an assistant
+judgment, not ground truth: inspect disagreements with human labels and sample
+the model's evidence quotes.
+
+For an offline second rater, point the same command at a complete local
+causal or encoder-decoder Transformers checkpoint. No model download is
+allowed unless `--allow_download` is explicitly supplied:
+
+```text
+python -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device auto --max_input_tokens 8192 --overwrite
+```
+
+The local and Gemini backends use the same prompt and output fields, making
+their label distributions and disagreements directly comparable.
+
 ## Reading the scores
 
 The source-based factuality models were developed mainly for English. mFACT-vi_VN is the Vietnamese-specific classifier in this repository, but it was trained from translated/silver faithfulness data rather than your company’s human labels. Treat all automatic scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific.

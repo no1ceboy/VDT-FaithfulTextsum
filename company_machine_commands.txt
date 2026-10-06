@@ -142,6 +142,23 @@ not_a_claim for headings, labels, and fragments that do not assert a fact; add
 notes if needed, then click Download completed JSONL. Automatic flags are
 triage hints, not labels.
 
+Optional LLM second-rater pass. This does not overwrite human_label. The
+Gemini backend sends source text to Google, so use it only if company policy
+approves that transfer. Set GEMINI_API_KEY in the environment outside this
+file; never paste the key into a command or JSONL:
+
+  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --limit 1 --overwrite
+
+The one-row command is a smoke test. Remove --limit 1 for all claims. If a
+run stops, repeat with --resume instead of --overwrite:
+
+  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --resume
+
+Offline local-LLM second rater. The checkpoint must already be complete under
+models/; this command does not download anything by default:
+
+  python3 -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device auto --max_input_tokens 8192 --overwrite
+
 After generation, audit a comparison file produced by `generate_summaries.py`.
 That script writes the source as `source`, the reference as `human_sum`, and
 the generated field using the requested `--summary_col`:
