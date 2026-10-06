@@ -110,6 +110,38 @@ Claim/evidence audit of the cleaned batch_3 reference (low-memory; start with 20
     --offline \
     --output results/batch_3_human_claim_audit.jsonl
 
+Manual review of 20 human-summary documents. First create the lightweight
+claim/evidence file; this does not require mFACT:
+
+  python3 -m src.evaluate.fact_audit \
+    --data data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --summary_col output \
+    --no_mfact \
+    --split_clauses \
+    --top_k 3 \
+    --output results/batch_3_human_claim_audit_retrieval.jsonl
+
+Then create the offline browser form and editable JSONL template. This selects
+10 automatically flagged and 10 unflagged documents with seed 42:
+
+  python3 -m src.evaluate.manual_review \
+    --data data/batch_3_cleaned.jsonl \
+    --audit results/batch_3_human_claim_audit_retrieval.jsonl \
+    --jsonl results/batch_3_manual_review_20.jsonl \
+    --html results/batch_3_manual_review_20.html \
+    --documents 20 \
+    --flagged_fraction 0.5 \
+    --seed 42 \
+    --source_col input \
+    --summary_col output
+
+Open results/batch_3_manual_review_20.html in a browser, label each item as
+supported, contradicted, not_supported, unclear, or not_a_claim. Use
+not_a_claim for headings, labels, and fragments that do not assert a fact; add
+notes if needed, then click Download completed JSONL. Automatic flags are
+triage hints, not labels.
+
 After generation, audit a comparison file produced by `generate_summaries.py`.
 That script writes the source as `source`, the reference as `human_sum`, and
 the generated field using the requested `--summary_col`:

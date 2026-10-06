@@ -159,6 +159,43 @@ Use `--no_mfact` for extraction/retrieval-only debugging. Compare the same
 documents across systems and manually label flagged claims before treating the
 aggregate rates as evidence of a real Vietnamese faithfulness gap.
 
+### Manual review packet
+
+For a small human audit, first create a retrieval-only claim file. This does
+not need mFACT or any additional model and leaves the input data unchanged:
+
+```text
+python -m src.evaluate.fact_audit \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --no_mfact --split_clauses --top_k 3 \
+  --output results/batch_3_human_claim_audit_retrieval.jsonl
+```
+
+Then create a deterministic 20-document review packet. By default it selects
+10 documents with automatic triage flags and 10 without flags:
+
+```text
+python -m src.evaluate.manual_review \
+  --data data/batch_3_cleaned.jsonl \
+  --audit results/batch_3_human_claim_audit_retrieval.jsonl \
+  --jsonl results/batch_3_manual_review_20.jsonl \
+  --html results/batch_3_manual_review_20.html \
+  --documents 20 --flagged_fraction 0.5 --seed 42 \
+  --source_col input --summary_col output
+```
+
+Open the generated `.html` file in a browser. For every claim, compare the
+claim against the full source and the retrieved evidence, choose one label,
+and add a note when useful. The labels mean `supported` (the source entails
+the claim), `contradicted` (the source conflicts with it), `not_supported`
+(the source does not provide enough evidence), `unclear` (ambiguous or hard
+to decide), and `not_a_claim` (a heading, label, fragment, or other
+non-proposition). The page's automatic flags and retrieval scores are review
+aids only; they are not human labels. Click **Download completed JSONL** when
+finished and keep the resulting file under `results/` for analysis.
+
 ## Reading the scores
 
 The source-based factuality models were developed mainly for English. mFACT-vi_VN is the Vietnamese-specific classifier in this repository, but it was trained from translated/silver faithfulness data rather than your company’s human labels. Treat all automatic scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific.
