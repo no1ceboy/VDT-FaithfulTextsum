@@ -17,6 +17,7 @@ new file, leaves the original unchanged, and writes the report/audit under
     --output data/batch_3_cleaned.jsonl \
     --source_col input \
     --reference_col output \
+    --replacement_policy drop \
     --drop_stale_token_lengths \
     --report results/batch_3_cleaning.json \
     --audit_log results/batch_3_cleaning.audit.jsonl
@@ -95,10 +96,26 @@ Vietnamese mFACT evaluation (optional; upload the complete model folder first):
     --batch_size 1 \
     --output results/sds_grpo_fft_mfact_scored.jsonl
 
-Claim/evidence behavior audit (low-memory; start with 20 rows):
+Claim/evidence audit of the cleaned batch_3 reference (low-memory; start with 20 rows):
 
   python3 -m src.evaluate.fact_audit \
-    --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+    --data data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --summary_col output \
+    --mfact_model_path models/mfact-vi_VN \
+    --device cpu \
+    --batch_size 1 \
+    --top_k 3 \
+    --limit 20 \
+    --offline \
+    --output results/batch_3_human_claim_audit.jsonl
+
+After generation, audit a comparison file produced by `generate_summaries.py`.
+That script writes the source as `source`, the reference as `human_sum`, and
+the generated field using the requested `--summary_col`:
+
+  python3 -m src.evaluate.fact_audit \
+    --data outputs/batch_3_grpo_summaries.jsonl \
     --source_col source \
     --summary_cols human_sum grpo_sum \
     --mfact_model_path models/mfact-vi_VN \
@@ -107,7 +124,7 @@ Claim/evidence behavior audit (low-memory; start with 20 rows):
     --top_k 3 \
     --limit 20 \
     --offline \
-    --output results/sds_grpo_claim_audit.jsonl
+    --output results/batch_3_grpo_claim_audit.jsonl
 
 If the earlier baseline output has the same IDs plus `abstract_sum` and
 `llm_sum`, add `--existing_jsonl results/baseline.jsonl` to the generation

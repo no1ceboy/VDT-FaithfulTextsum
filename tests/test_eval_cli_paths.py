@@ -80,6 +80,11 @@ class EvalCliPathTests(unittest.TestCase):
             ["factcc", "minicheck", "alignscore"],
         )
 
+    def test_legacy_output_schema_remains_supported(self) -> None:
+        rows = [{"input": "source", "output": "summary"}]
+        self.assertEqual(_summary_columns(rows), ["output"])
+        self.assertEqual(_reference_column(rows), "output")
+
     def test_roberta_base_requires_weights_tokenizer_and_config(self) -> None:
         with tempfile.TemporaryDirectory(prefix="vdt-roberta-test-") as temporary:
             folder = Path(temporary)

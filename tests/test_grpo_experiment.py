@@ -41,6 +41,12 @@ class GrpoDataTests(unittest.TestCase):
             ("text", "summary"),
         )
 
+    def test_legacy_output_is_a_reference_alias(self) -> None:
+        self.assertEqual(
+            infer_columns({"id": "1", "input": "document", "output": "summary"}),
+            ("input", "output"),
+        )
+
     def test_included_example_conforms_to_prepared_schema(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         (row,) = read_records(project_root / "data" / "sample.jsonl", reference_col="abstract_sum")

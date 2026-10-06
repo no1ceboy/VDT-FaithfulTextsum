@@ -191,6 +191,8 @@ def _summary_columns(
         return ["summary"]
     if all("abstract_sum" in record for record in records):
         return ["abstract_sum"]
+    if all("output" in record for record in records):
+        return ["output"]
     raise ValueError("Could not infer summary fields. Pass --summary_col or --summary_cols.")
 
 
@@ -217,7 +219,7 @@ def _reference_column(records: list[dict[str, Any]], requested: str | None = Non
     """
     if requested:
         return requested
-    for candidate in ("human_sum", "reference", "abstract_sum", "summary"):
+    for candidate in ("human_sum", "reference", "abstract_sum", "summary", "output"):
         if all(candidate in record for record in records):
             return candidate
     return "human_sum"

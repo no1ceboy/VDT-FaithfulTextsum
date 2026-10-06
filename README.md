@@ -10,13 +10,18 @@ Use UTF-8 JSONL with one record per document. The canonical human-training forma
 {"id":"7","text":"source document text","summary":"human summary"}
 ```
 
-Here, `summary` is the human reference used to prepare SFT/GRPO data. The original file is read-only; preparation writes separate split files under the selected output directory. `text` is the grounding document. Source-based factuality metrics score a candidate summary against it. ROUGE and BERTScore compare a generated candidate to a separate human reference. `source` is also accepted as an alias. The older paired format remains supported:
+Here, `summary` is the human reference used to prepare SFT/GRPO data. The original file is read-only; preparation writes separate split files under the selected output directory. `text` is the grounding document. Source-based factuality metrics score a candidate summary against it. ROUGE and BERTScore compare a generated candidate to a separate human reference. `source` is also accepted as an alias. The older paired formats remain supported:
 
 ```json
 {"id":"7","input":"source document text","human_sum":"human summary","llm_sum":"LLM summary"}
 ```
 
-The evaluator and preparer auto-detect `text`/`summary`, then `source`/`summary`, then the legacy `input`/`human_sum` names. Use explicit `--source_col`, `--summary_col`, or `--reference_col` when a file contains several candidate columns.
+An `id/input/output` file is also accepted when `output` is the reference;
+pass explicit columns when using it in a mixed comparison file. The evaluator
+and preparer auto-detect `text`/`summary`, then `source`/`summary`, then the
+legacy `input`/`human_sum` or `input`/`output` names. Use explicit
+`--source_col`, `--summary_col`, or `--reference_col` when a file contains
+several candidate columns.
 
 ### Clean a dataset without changing the original
 
@@ -35,6 +40,7 @@ python -m src.data.clean_dataset \
   --output data/batch_3_cleaned.jsonl \
   --source_col input \
   --reference_col output \
+  --replacement_policy drop \
   --drop_stale_token_lengths \
   --report results/batch_3_cleaning.json \
   --audit_log results/batch_3_cleaning.audit.jsonl
@@ -118,12 +124,12 @@ not an automatic contradiction label.
 
 ```text
 python -m src.evaluate.fact_audit \
-  --data results/grpo_test_compare.jsonl \
+  --data data/batch_3_cleaned.jsonl \
   --source_col input \
-  --summary_cols human_sum base_sum grpo_sum \
+  --summary_col output \
   --mfact_model_path models/mfact-vi_VN \
   --device cpu --batch_size 1 --top_k 3 --limit 20 \
-  --offline --output results/grpo_claim_audit.jsonl
+  --offline --output results/batch_3_human_claim_audit.jsonl
 ```
 
 Use `--no_mfact` for extraction/retrieval-only debugging. Compare the same

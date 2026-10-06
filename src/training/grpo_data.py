@@ -37,8 +37,9 @@ def read_records(
     """Read and validate JSONL without silently coercing bad or missing fields.
 
     The preferred raw schema is ``id/text/summary``.  ``source`` is accepted
-    as an equivalent source name, and the historical ``id/input/human_sum``
-    schema remains supported. Explicit column names always take precedence.
+    as an equivalent source name, and historical ``id/input/human_sum`` and
+    ``id/input/output`` schemas remain supported. Explicit column names always
+    take precedence.
     """
     path = Path(input_path)
     records: list[dict[str, Any]] = []
@@ -67,7 +68,7 @@ def read_records(
                 )
             if resolved_reference_col not in raw:
                 fields = ", ".join(sorted(map(str, raw))) or "<none>"
-                likely_names = ("abstract_sum", "human_sum", "reference", "summary")
+                likely_names = ("abstract_sum", "human_sum", "reference", "summary", "output")
                 suggestions = [name for name in likely_names if name in raw]
                 hint = (
                     f" Possible reference field: {', '.join(suggestions)}; pass it with --reference_col."
@@ -139,6 +140,8 @@ def infer_columns(
         resolved_reference = reference_col
     elif "summary" in raw and ("text" in raw or "source" in raw):
         resolved_reference = "summary"
+    elif "output" in raw:
+        resolved_reference = "output"
     else:
         resolved_reference = "human_sum"
     return resolved_source, resolved_reference
