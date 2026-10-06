@@ -229,6 +229,19 @@ python -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B
 The local and Gemini backends use the same prompt and output fields, making
 their label distributions and disagreements directly comparable.
 
+Recover the factual claims after the LLM pass. This filters out
+`not_a_claim` rows without changing their original text; unresolved rows are
+written separately instead of being silently treated as claims:
+
+```text
+python -m src.evaluate.claim_recovery --input results/batch_3_manual_review_20.gemini.jsonl --label_col llm_label --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --unresolved_output results/batch_3_unresolved.gemini.jsonl
+```
+
+For human labels, use the same command with `--label_col human_label`. A
+`not_supported` row is still a claim—it is a proposition for which the source
+did not provide enough evidence. Only `not_a_claim` is removed from the
+factual-claim set.
+
 ## Reading the scores
 
 The source-based factuality models were developed mainly for English. mFACT-vi_VN is the Vietnamese-specific classifier in this repository, but it was trained from translated/silver faithfulness data rather than your company’s human labels. Treat all automatic scores as exploratory, compare systems only within the same metric/configuration, and manually label a sample for factual support before claiming improved faithfulness. BERTScore can use a multilingual encoder, but that does not make its Vietnamese scores calibrated or factuality-specific.

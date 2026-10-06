@@ -159,6 +159,16 @@ models/; this command does not download anything by default:
 
   python3 -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device auto --max_input_tokens 8192 --overwrite
 
+Recover actual factual claims after either human or LLM labeling. A claim is
+a minimal unit that asserts an event, state, relation, quantity, or other
+proposition with a truth value checkable against the source. Headings and
+topic labels remain available but are excluded from the claim file:
+
+  python3 -m src.evaluate.claim_recovery --input results/batch_3_manual_review_20.gemini.jsonl --label_col llm_label --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --unresolved_output results/batch_3_unresolved.gemini.jsonl
+
+For manual labels, replace --label_col llm_label with --label_col human_label.
+not_supported is still an actual claim; only not_a_claim is excluded.
+
 After generation, audit a comparison file produced by `generate_summaries.py`.
 That script writes the source as `source`, the reference as `human_sum`, and
 the generated field using the requested `--summary_col`:
