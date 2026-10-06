@@ -112,6 +112,29 @@ python scripts/make_report.py --input results/baseline.jsonl --output results/ba
 
 The report includes mean/median/standard deviation, valid/missing counts, inline score bars, text-length checks, and the adjacent machine-readable JSON. Add `--run_dir outputs/grpo_lora_minicheck_001` to include the training manifest and recent training history. TensorBoard remains the detailed training visualization when the company environment provides it.
 
+### Generate on Kaggle with Hugging Face
+
+The default generator is offline and expects a local model folder, which is
+the correct mode for the restricted company machine. On Kaggle, clone this
+repository, attach the private dataset, and use a Hugging Face model ID with
+`--online`. Store a Hugging Face read token in Kaggle Secrets as `HF_TOKEN`; do
+not put the token in the notebook or command line. The Llama model also
+requires accepting Meta's model access terms on Hugging Face.
+
+```text
+python scripts/generate_summaries.py \
+  --model meta-llama/Llama-3.2-3B-Instruct \
+  --online --hf_token_env HF_TOKEN \
+  --input_jsonl /kaggle/input/vdt-faithfultextsum-batch3-cleaned/batch_3_cleaned.jsonl \
+  --output /kaggle/working/batch_3_llama32_3b_summaries.jsonl \
+  --summary_col llm_sum \
+  --batch_size 1 --dtype float16
+```
+
+`--online` is opt-in. It leaves the company-machine path local-only and
+selects FP16 automatically on GPUs that do not support BF16, such as many
+Kaggle T4/P100 instances.
+
 ## Claim-level behavior audit
 
 The scalar evaluators are useful for comparison, but they do not show which

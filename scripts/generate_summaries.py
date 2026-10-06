@@ -100,8 +100,24 @@ def _sha256(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, help="Local base model or PEFT adapter directory")
-    parser.add_argument("--base_model", help="Local base checkpoint required when --model is an adapter")
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Local base/adapter directory, or a Hugging Face model ID when --online is set",
+    )
+    parser.add_argument("--base_model", help="Base checkpoint required when --model is a local adapter")
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="Allow Hugging Face downloads; the HF token is read from --hf_token_env",
+    )
+    parser.add_argument("--hf_token_env", default="HF_TOKEN", help="Environment variable containing a HF read token")
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "bfloat16", "float16"),
+        default="auto",
+        help="CUDA inference dtype; auto selects BF16 when supported, otherwise FP16",
+    )
     parser.add_argument(
         "--input_jsonl",
         required=True,
@@ -116,17 +132,24 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        model_path = Path(args.model).expanduser().resolve()
-        base_model_path = Path(args.base_model).expanduser().resolve() if args.base_model else model_path
+        requested_model_path = Path(args.model).expanduser()
+        model_is_local = requested_model_path.is_dir()
+        model_path = requested_model_path.resolve() if model_is_local else None
+        adapter_path = model_path if model_path and (model_path / "adapter_config.json").exists() else None
+        if not model_is_local and not args.online:
+            raise ValueError(
+                "--model must be a local directory unless --online is set for a Hugging Face model ID"
+            )
+        if args.base_model and not adapter_path:
+            raise ValueError("--base_model is only used when --model is a local PEFT adapter")
+        base_model_ref = args.base_model if args.base_model else args.model
+        if args.base_model:
+            base_model_ref = str(Path(args.base_model).expanduser().resolve())
         input_path = Path(args.input_jsonl).expanduser().resolve()
         existing_path = Path(args.existing_jsonl).expanduser().resolve() if args.existing_jsonl else None
         output_path = Path(args.output).expanduser().resolve()
-        if not model_path.is_dir() or not base_model_path.is_dir():
-            raise ValueError("--model and --base_model (when used) must be existing local directories")
-        if (model_path / "adapter_config.json").exists() and not args.base_model:
+        if adapter_path and not args.base_model:
             raise ValueError("--model is a PEFT adapter; pass --base_model with its local base checkpoint")
-        if args.base_model and not (model_path / "adapter_config.json").exists():
-            raise ValueError("--base_model is only used when --model is a PEFT adapter")
         if not input_path.is_file():
             raise ValueError(f"Input JSONL does not exist: {input_path}")
         if existing_path and not existing_path.is_file():
@@ -169,30 +192,49 @@ def main() -> int:
                 if args.summary_col in old:
                     raise ValueError(f"Existing row {row['id']!r} already has summary column {args.summary_col!r}")
 
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        if args.online:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            hf_token = os.environ.get(args.hf_token_env)
+            if not hf_token and str(args.model).startswith("meta-llama/"):
+                raise ValueError(
+                    f"Online gated Hugging Face models require a read token in ${args.hf_token_env}"
+                )
+            hub_kwargs = {"local_files_only": False}
+            if hf_token:
+                hub_kwargs["token"] = hf_token
+        else:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            hub_kwargs = {"local_files_only": True}
         import torch
         from peft import PeftModel
         from importlib.metadata import version
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-            raise RuntimeError("Generation requires a CUDA GPU with BF16 support")
+        if not torch.cuda.is_available():
+            raise RuntimeError("Generation requires a CUDA GPU")
+        if args.dtype == "bfloat16":
+            model_dtype = torch.bfloat16
+        elif args.dtype == "float16":
+            model_dtype = torch.float16
+        else:
+            model_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         from transformers import AutoConfig
 
-        model_config = AutoConfig.from_pretrained(str(base_model_path), local_files_only=True)
+        model_config = AutoConfig.from_pretrained(base_model_ref, **hub_kwargs)
         context_limit = getattr(model_config, "max_position_embeddings", None)
-        tokenizer = AutoTokenizer.from_pretrained(str(base_model_path), local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(base_model_ref, **hub_kwargs)
         if not tokenizer.chat_template:
             raise ValueError("Local tokenizer has no chat template")
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
         model = AutoModelForCausalLM.from_pretrained(
-            str(base_model_path), local_files_only=True, torch_dtype=torch.bfloat16
+            base_model_ref, torch_dtype=model_dtype, **hub_kwargs
         )
-        if (model_path / "adapter_config.json").exists():
-            model = PeftModel.from_pretrained(model, str(model_path), is_trainable=False)
+        if adapter_path:
+            model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
         model.to("cuda")
         model.eval()
 
@@ -267,8 +309,8 @@ def main() -> int:
         manifest = {
             "experiment": "VDT summarization generation",
             "generated_utc": datetime.now(timezone.utc).isoformat(),
-            "model_or_adapter_path": str(model_path),
-            "base_model_path": str(base_model_path),
+            "model_or_adapter_path": str(model_path) if model_path else args.model,
+            "base_model_path": base_model_ref,
             "model_commit_hash_from_config": getattr(model_config, "_commit_hash", None),
             "input_jsonl": str(input_path),
             "input_sha256": _sha256(input_path),
@@ -289,7 +331,8 @@ def main() -> int:
             },
             "cuda_version": torch.version.cuda,
             "gpu_name": torch.cuda.get_device_name(torch.cuda.current_device()),
-            "offline_mode": True,
+            "offline_mode": not args.online,
+            "dtype": str(model_dtype).replace("torch.", ""),
         }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"Saved summaries to {output_path}")
