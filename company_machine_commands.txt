@@ -142,7 +142,21 @@ not_a_claim for headings, labels, and fragments that do not assert a fact; add
 notes if needed, then click Download completed JSONL. Automatic flags are
 triage hints, not labels.
 
-Optional LLM second-rater pass. This does not overwrite human_label. The
+Two-stage LLM claim audit. First locate exact factual spans. Candidate spans
+are taken from the original summary; the model only answers is_claim, and the
+accepted rows retain the original text plus character offsets:
+
+  python3 -m src.evaluate.claim_extractor --backend gemini --model gemini-3.5-flash-lite --input data/batch_3_cleaned.jsonl --source_col input --summary_col output --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --error_output results/batch_3_claim_extraction_errors.jsonl --limit 1 --sleep_seconds 0.2
+
+Remove --limit 1 for all documents. Then verify only the recovered claims:
+
+  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_claims.gemini.jsonl --output results/batch_3_claim_verdicts.gemini.jsonl --overwrite
+
+For a local model, replace the Gemini backend/model in both commands with
+--backend local --model models/Qwen2.5-3B-Instruct. The local backend does not
+download by default.
+
+Optional LLM second-rater pass over the manual-review packet. This does not overwrite human_label. The
 Gemini backend sends source text to Google, so use it only if company policy
 approves that transfer. Set GEMINI_API_KEY in the environment outside this
 file; never paste the key into a command or JSONL:

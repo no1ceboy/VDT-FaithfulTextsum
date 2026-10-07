@@ -278,17 +278,24 @@ class GeminiClaimJudge:
                 raise JudgeError("Gemini returned invalid JSON") from exc
         raise JudgeError("Gemini request exhausted retries")
 
-    def judge(self, row: dict[str, Any]) -> dict[str, Any]:
+    def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict[str, Any],
+        *,
+        max_output_tokens: int = 256,
+    ) -> str:
         payload = {
-            "systemInstruction": {"parts": [{"text": JUDGE_SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": build_judge_prompt(row)}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": {
                 "temperature": 0.0,
-                "maxOutputTokens": 256,
+                "maxOutputTokens": max_output_tokens,
                 "responseFormat": {
                     "text": {
                         "mimeType": "application/json",
-                        "schema": JUDGMENT_SCHEMA,
+                        "schema": schema,
                     }
                 },
             },
@@ -302,6 +309,14 @@ class GeminiClaimJudge:
         text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict))
         if not text.strip():
             raise JudgeError("Gemini candidate contained no text")
+        return text
+
+    def judge(self, row: dict[str, Any]) -> dict[str, Any]:
+        text = self.generate_text(
+            JUDGE_SYSTEM_PROMPT,
+            build_judge_prompt(row),
+            JUDGMENT_SCHEMA,
+        )
         judgment = parse_judgment(text)
         judgment["raw_response"] = text
         return judgment
@@ -373,9 +388,9 @@ class LocalClaimJudge:
         self.is_encoder_decoder = bool(getattr(self.model.config, "is_encoder_decoder", False))
         self.input_device = next(self.model.parameters()).device
 
-    def _model_prompt(self, user_prompt: str) -> str:
+    def _model_prompt(self, system_prompt: str, user_prompt: str) -> str:
         messages = [
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         apply_chat_template = getattr(self.tokenizer, "apply_chat_template", None)
@@ -386,10 +401,10 @@ class LocalClaimJudge:
                 )
             except (ValueError, TemplateError):
                 pass
-        return JUDGE_SYSTEM_PROMPT + "\n\n" + user_prompt + "\n\nJSON response:\n"
+        return system_prompt + "\n\n" + user_prompt + "\n\nJSON response:\n"
 
-    def judge(self, row: dict[str, Any]) -> dict[str, Any]:
-        prompt = self._model_prompt(build_judge_prompt(row))
+    def generate_text(self, system_prompt: str, user_prompt: str) -> str:
+        prompt = self._model_prompt(system_prompt, user_prompt)
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",
@@ -410,7 +425,10 @@ class LocalClaimJudge:
         else:
             input_length = inputs["input_ids"].shape[-1]
             generated_tokens = generated[0][input_length:]
-        text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+    def judge(self, row: dict[str, Any]) -> dict[str, Any]:
+        text = self.generate_text(JUDGE_SYSTEM_PROMPT, build_judge_prompt(row))
         judgment = parse_judgment(text)
         judgment["raw_response"] = text
         return judgment

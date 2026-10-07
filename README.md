@@ -198,6 +198,26 @@ finished and keep the resulting file under `results/` for analysis.
 
 ### LLM-assisted claim judgment
 
+The first stage can now locate exact factual spans before verification. The
+splitter creates candidate spans in the original summary, and Gemini or a
+local model answers only `is_claim`. Accepted rows keep the verbatim claim,
+`start_char`, and `end_char`; no model paraphrase is used as the claim text.
+Headings and fragments can be written to a separate file:
+
+```text
+python -m src.evaluate.claim_extractor --backend gemini --model gemini-3.5-flash-lite --input data/batch_3_cleaned.jsonl --source_col input --summary_col output --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --error_output results/batch_3_claim_extraction_errors.jsonl --limit 1 --sleep_seconds 0.2
+```
+
+Remove `--limit 1` for the full input. Then verify only the recovered claims:
+
+```text
+python -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_claims.gemini.jsonl --output results/batch_3_claim_verdicts.gemini.jsonl --overwrite
+```
+
+The local extractor uses the same two-stage contract by replacing
+`--backend gemini --model gemini-3.5-flash-lite` with
+`--backend local --model models/Qwen2.5-3B-Instruct`.
+
 The repository also supports a second-rater pass over the review JSONL. It
 uses the same five labels and writes `llm_label`, `llm_reason`,
 `llm_evidence_quote`, and `llm_confidence`; it never overwrites
