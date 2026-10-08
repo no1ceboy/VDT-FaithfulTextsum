@@ -396,9 +396,22 @@ class LocalClaimJudge:
         apply_chat_template = getattr(self.tokenizer, "apply_chat_template", None)
         if callable(apply_chat_template):
             try:
+                # Qwen-style reasoning templates support this flag. Older or
+                # unrelated templates reject the keyword, so fall back to
+                # their normal invocation below.
                 return apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
                 )
+            except TypeError:
+                try:
+                    return apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                except (ValueError, TemplateError):
+                    pass
             except (ValueError, TemplateError):
                 pass
         return system_prompt + "\n\n" + user_prompt + "\n\nJSON response:\n"

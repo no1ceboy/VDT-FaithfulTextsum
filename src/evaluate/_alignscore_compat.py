@@ -10,6 +10,7 @@ port as interchangeable in a research result.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -20,10 +21,63 @@ import torch
 from torch import Tensor, nn
 from transformers import AutoTokenizer, RobertaConfig, RobertaModel
 
+from ._local_model_paths import find_model_dir, has_complete_transformers_files
+
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_MODES = {"nli_sp", "nli", "bin_sp", "bin"}
 _MODEL_ID = "roberta-base"
+
+
+def _is_roberta_model_dir(path: Path) -> bool:
+    """Recognize a complete RoBERTa folder without assuming its size."""
+    if not has_complete_transformers_files(
+        path, tokenizer_filenames=("tokenizer.json",)
+    ) and not (
+        (path / "config.json").is_file()
+        and any(
+            (path / name).is_file()
+            for name in (
+                "model.safetensors",
+                "pytorch_model.bin",
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            )
+        )
+        and (path / "vocab.json").is_file()
+        and (path / "merges.txt").is_file()
+    ):
+        return False
+    try:
+        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    model_type = str(config.get("model_type", "")).lower()
+    return not model_type or model_type == "roberta"
+
+
+def _resolve_local_backbone(model_reference: str, cache_dir: str | Path | None) -> Path | None:
+    """Resolve a direct or wrapped local RoBERTa folder when available."""
+    requested = Path(model_reference).expanduser()
+    if requested.is_dir():
+        if _is_roberta_model_dir(requested):
+            return requested.resolve()
+        nested = find_model_dir(
+            requested,
+            is_complete=_is_roberta_model_dir,
+            preferred_tokens=("roberta-base", "roberta-large", "roberta"),
+        )
+        if nested is not None:
+            return nested
+        return requested.resolve()
+    if cache_dir is None:
+        return None
+    variant = model_reference.replace("/", "-").lower()
+    return find_model_dir(
+        cache_dir,
+        is_complete=_is_roberta_model_dir,
+        preferred_tokens=(variant, variant.replace("facebookai-", ""), "roberta"),
+    )
 
 
 def _load_backbone_assets(
@@ -33,8 +87,9 @@ def _load_backbone_assets(
 ) -> tuple[Any, RobertaConfig, str]:
     """Load tokenizer/config from an extracted backbone folder or Hub cache."""
     local_path = Path(model_reference).expanduser()
-    if local_path.is_dir():
-        model_ids = [str(local_path.resolve())]
+    resolved_local = _resolve_local_backbone(model_reference, cache_dir)
+    if resolved_local is not None:
+        model_ids = [str(resolved_local)]
         cache_path = None
         local_files_only = True
     else:

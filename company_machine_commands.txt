@@ -8,6 +8,12 @@ Extract MiniCheck into the existing cache (the ZIP has files at its root):
 
   python -m zipfile -e VDT-FaithfulTextsum-MiniCheck-Flan-T5-Large.zip models/hf-cache
 
+The evaluator searches recursively below `models/hf-cache`, so these are also
+valid: `models/hf-cache/MiniCheck-Flan-T5-Large/` or an uploaded wrapper such
+as `models/hf-cache/uploaded/MiniCheck-Flan-T5-Large/`. The selected model
+folder must directly contain `config.json`, model weights, and `spiece.model`
+or `tokenizer.json`. Do not point at a `blobs/` directory.
+
 Clean the loaded batch_3 dataset before training or generation. This writes a
 new file, leaves the original unchanged, and writes the report/audit under
 `results/`. The legacy fields are `input` and `output`:
@@ -50,6 +56,35 @@ Use `data/batch_3_cleaned.jsonl` below as the input for later preparation:
 
 After it succeeds, rerun without `--limit 10`; change output to
 `results/baseline.jsonl`.
+
+Optional FENICE/QAFactEval runs are not part of the approved shared
+environment. Use an IT-provisioned compatible environment for each one.
+FENICE uses its fixed Hugging Face model IDs from the local cache and extracts
+summary claims before NLI alignment:
+
+  python3 -m src.evaluate.run_eval \
+    --data data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --summary_col output \
+    --metrics fenice \
+    --hf_cache_dir models/hf-cache \
+    --offline \
+    --device cuda \
+    --batch_size 1 \
+    --output results/batch_3_fenice.jsonl
+
+QAFactEval uses the model tree produced by its upstream `download_models.sh`,
+not the Transformers cache:
+
+  python3 -m src.evaluate.run_eval \
+    --data data/batch_3_cleaned.jsonl \
+    --source_col input \
+    --summary_col output \
+    --metrics qafacteval \
+    --qafacteval_model_path models/qafacteval \
+    --device cuda \
+    --batch_size 1 \
+    --output results/batch_3_qafacteval.jsonl
 
 Create an HTML/JSON results report without extra packages:
 
@@ -150,11 +185,20 @@ accepted rows retain the original text plus character offsets:
 
 Remove --limit 1 for all documents. Then verify only the recovered claims:
 
+Claim extraction preserves full sentences by default. Do not enable clause
+splitting for heading-style text such as `Tuoi Than: gap nhieu rac roi trong
+cong viec`; `--split_clauses` is available only for a deliberate ablation.
+
   python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_claims.gemini.jsonl --output results/batch_3_claim_verdicts.gemini.jsonl --overwrite
 
-For a local model, replace the Gemini backend/model in both commands with
---backend local --model models/Qwen2.5-3B-Instruct. The local backend does not
-download by default.
+For a local model, replace the Gemini backend/model in both commands with a
+local instruction model. For Llama 3.2 3B, use
+--backend local --model models/Llama-3.2-3B-Instruct --device cuda
+--dtype bfloat16 --max_new_tokens 128. The local backend does not download by
+default. It accepts common Llama response variants and makes at most one
+repair attempt when the first response is malformed. Remove --limit 1 after
+the smoke test. Error rows preserve the raw model response, and accepted rows
+record claimness_raw_attempts and claimness_repair_attempted.
 
 Optional LLM second-rater pass over the manual-review packet. This does not overwrite human_label. The
 Gemini backend sends source text to Google, so use it only if company policy

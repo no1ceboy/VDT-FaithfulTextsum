@@ -13,6 +13,7 @@ from src.evaluate.run_eval import (
     _nltk_data_root,
     _project_path,
     _reference_column,
+    _resolve_alignscore_backbone,
     _resolve_roberta_base,
     _source_column,
     main,
@@ -111,6 +112,38 @@ class EvalCliPathTests(unittest.TestCase):
                     _resolve_roberta_base("models/roberta-base", str(cache)),
                     snapshot.resolve(),
                 )
+
+    def test_roberta_base_can_be_resolved_from_nested_extracted_folder(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vdt-roberta-nested-test-") as temporary:
+            root = Path(temporary)
+            wrapper = root / "uploaded" / "roberta-base"
+            wrapper.mkdir(parents=True)
+            for filename in ("config.json", "model.safetensors", "tokenizer.json"):
+                (wrapper / filename).touch()
+
+            with patch("src.evaluate.run_eval.PROJECT_ROOT", root):
+                resolved = _resolve_roberta_base(
+                    "uploaded", str(root / "missing-cache")
+                )
+            self.assertEqual(resolved, wrapper.resolve())
+
+    def test_alignscore_large_selects_matching_nested_roberta_large_folder(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vdt-roberta-large-test-") as temporary:
+            root = Path(temporary)
+            wrapper = root / "uploaded" / "roberta-large"
+            wrapper.mkdir(parents=True)
+            (wrapper / "config.json").write_text(
+                json.dumps({"model_type": "roberta", "hidden_size": 1024}),
+                encoding="utf-8",
+            )
+            for filename in ("model.safetensors", "tokenizer.json"):
+                (wrapper / filename).touch()
+
+            with patch("src.evaluate.run_eval.PROJECT_ROOT", root):
+                resolved = _resolve_alignscore_backbone(
+                    "uploaded", str(root / "missing-cache"), "AlignScore-large.ckpt"
+                )
+            self.assertEqual(resolved, wrapper.resolve())
 
     def test_cli_scores_human_and_llm_summaries_without_legacy_column_args(self) -> None:
         row = {

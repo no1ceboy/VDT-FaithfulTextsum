@@ -23,6 +23,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from ._local_model_paths import find_model_dir
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -117,56 +119,112 @@ def _validate_roberta_base_folder(path: Path) -> None:
 
 def _cached_roberta_base(cache_dir: str | Path) -> Path | None:
     """Find a complete roberta-base snapshot inside a transferred Hub cache."""
+    return _cached_roberta_variant(cache_dir, "base")
+
+
+def _complete_roberta_folder(path: Path, variant: str) -> bool:
+    """Validate a RoBERTa folder and, when possible, its base/large size."""
+    try:
+        _validate_roberta_base_folder(path)
+    except FileNotFoundError:
+        return False
+    try:
+        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    model_type = str(config.get("model_type", "")).lower()
+    if model_type and model_type != "roberta":
+        return False
+    hidden_size = config.get("hidden_size")
+    expected_hidden_size = {"base": 768, "large": 1024}[variant]
+    return hidden_size is None or hidden_size == expected_hidden_size
+
+
+def _cached_roberta_variant(cache_dir: str | Path, variant: str) -> Path | None:
+    """Find a complete base/large RoBERTa snapshot in a transferred cache."""
     try:
         cache_root = _hf_cache_root(str(cache_dir))
     except FileNotFoundError:
         return None
-    for entry_name in ("models--FacebookAI--roberta-base", "models--roberta-base"):
+    entry_names = (
+        ("models--FacebookAI--roberta-base", "models--roberta-base")
+        if variant == "base"
+        else ("models--FacebookAI--roberta-large", "models--roberta-large")
+    )
+    preferred_tokens = (
+        ("roberta-base", "facebookai--roberta-base")
+        if variant == "base"
+        else ("roberta-large", "facebookai--roberta-large")
+    )
+    predicate = lambda path: _complete_roberta_folder(path, variant)
+    for entry_name in entry_names:
         entry = cache_root / entry_name
-        snapshots = entry / "snapshots"
-        if not snapshots.is_dir():
-            continue
-        candidates: list[Path] = []
-        ref = entry / "refs" / "main"
-        if ref.is_file():
-            revision = ref.read_text(encoding="utf-8").strip()
-            if revision:
-                candidates.append(snapshots / revision)
-        candidates.extend(
-            sorted(
-                (child for child in snapshots.iterdir() if child.is_dir()),
-                key=lambda child: child.stat().st_mtime,
-                reverse=True,
-            )
+        candidate = find_model_dir(
+            entry,
+            is_complete=predicate,
+            preferred_tokens=preferred_tokens,
         )
-        for candidate in candidates:
-            try:
-                _validate_roberta_base_folder(candidate)
-            except FileNotFoundError:
-                continue
-            return candidate.resolve()
-    return None
+        if candidate is not None:
+            return candidate
+    return find_model_dir(
+        cache_root,
+        is_complete=predicate,
+        preferred_tokens=preferred_tokens,
+    )
 
 
-def _resolve_roberta_base(backbone_path: str, cache_dir: str | None) -> Path:
-    """Prefer the standard extracted folder, then a matching local Hub snapshot."""
+def _complete_roberta_base_folder(path: Path) -> bool:
+    """Predicate used while searching wrapped RoBERTa cache uploads."""
+    return _complete_roberta_folder(path, "base")
+
+
+def _resolve_roberta_variant(
+    backbone_path: str,
+    cache_dir: str | None,
+    variant: str,
+) -> Path:
+    """Resolve the requested RoBERTa-base or RoBERTa-large folder."""
     requested = _project_path(backbone_path)
+    predicate = lambda path: _complete_roberta_folder(path, variant)
+    preferred_tokens = (f"roberta-{variant}", f"facebookai--roberta-{variant}")
     if requested.is_dir():
         try:
             _validate_roberta_base_folder(requested)
             return requested
         except FileNotFoundError:
-            pass
+            nested = find_model_dir(
+                requested,
+                is_complete=predicate,
+                preferred_tokens=preferred_tokens,
+            )
+            if nested is not None:
+                logger.info("Using nested local RoBERTa-%s folder: %s", variant, nested)
+                return nested
     if cache_dir:
-        cached = _cached_roberta_base(_project_path(cache_dir))
+        cached = _cached_roberta_variant(_project_path(cache_dir), variant)
         if cached is not None:
-            logger.info("Using roberta-base from local Hugging Face snapshot: %s", cached)
+            logger.info("Using roberta-%s from local Hugging Face snapshot: %s", variant, cached)
             return cached
     raise FileNotFoundError(
-        f"Complete roberta-base assets were not found at {requested} or in the local "
+        f"Complete roberta-{variant} assets were not found at {requested} or in the local "
         f"Hugging Face cache {cache_dir!r}. The model folder must include config, "
         "pretrained weights, and tokenizer files."
     )
+
+
+def _resolve_roberta_base(backbone_path: str, cache_dir: str | None) -> Path:
+    """Prefer the standard extracted folder, then a matching local Hub snapshot."""
+    return _resolve_roberta_variant(backbone_path, cache_dir, "base")
+
+
+def _resolve_alignscore_backbone(
+    backbone_path: str,
+    cache_dir: str | None,
+    checkpoint_path: str,
+) -> Path:
+    """Resolve the RoBERTa size matching an AlignScore checkpoint filename."""
+    variant = "large" if "large" in Path(checkpoint_path).name.lower() else "base"
+    return _resolve_roberta_variant(backbone_path, cache_dir, variant)
 
 
 def _summary_columns(
@@ -555,17 +613,22 @@ def main() -> int:
                 "pass --alignscore_ckpt if it is elsewhere."
             )
         args.alignscore_ckpt = str(checkpoint_path)
-        backbone_path = _resolve_roberta_base(
-            args.alignscore_backbone_path, args.hf_cache_dir
+        backbone_path = _resolve_alignscore_backbone(
+            args.alignscore_backbone_path,
+            args.hf_cache_dir,
+            args.alignscore_ckpt,
         )
         args.alignscore_backbone_path = str(backbone_path)
 
-    if "minicheck" in args.metrics:
+    if {"minicheck", "fenice"}.intersection(args.metrics):
         if not args.hf_cache_dir:
-            raise ValueError("MiniCheck requires --hf_cache_dir with its local model/cache")
+            raise ValueError(
+                "MiniCheck and FENICE require --hf_cache_dir with their local model/cache"
+            )
         args.hf_cache_dir = str(_hf_cache_root(args.hf_cache_dir))
         os.environ["HF_HUB_CACHE"] = args.hf_cache_dir
         os.environ["HUGGINGFACE_HUB_CACHE"] = args.hf_cache_dir
+        os.environ["TRANSFORMERS_CACHE"] = args.hf_cache_dir
 
     if "mfact" in args.metrics:
         mfact_dir = _project_path(args.mfact_model_path)

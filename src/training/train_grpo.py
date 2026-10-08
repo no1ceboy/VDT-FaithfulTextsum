@@ -31,6 +31,7 @@ from src.training.grpo_data import (
     validate_prepared_record,
 )  # noqa: E402
 from src.training.grpo_rewards import make_metric_reward, reference_char_reward  # noqa: E402
+from src.evaluate.run_eval import _resolve_alignscore_backbone  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -322,9 +323,14 @@ def _check_local_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path, Pat
         checkpoint_path = _resolve_path(args.alignscore_ckpt)
         if not checkpoint_path.is_file():
             raise ValueError(f"AlignScore checkpoint does not exist: {checkpoint_path}")
-        backbone_path = _resolve_path(args.alignscore_backbone_path)
-        if not backbone_path.is_dir():
-            raise ValueError(f"Local roberta-base folder does not exist: {backbone_path}")
+        try:
+            backbone_path = _resolve_alignscore_backbone(
+                args.alignscore_backbone_path,
+                args.hf_cache_dir,
+                args.alignscore_ckpt,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError(str(exc)) from exc
         required_assets = ("config.json",)
         missing_assets = [name for name in required_assets if not (backbone_path / name).is_file()]
         has_weights = any(

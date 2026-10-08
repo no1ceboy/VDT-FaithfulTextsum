@@ -69,9 +69,9 @@ mFACT is opt-in because it requires its own approximately 715 MB checkpoint. Ena
 
 ROUGE-1, ROUGE-2, and ROUGE-L are included as a small standard-library implementation. BERTScore uses the existing PyTorch/Transformers stack directly, so it does not require installing the separate `bert-score` package; it does require transferring the full encoder/tokenizer checkpoint. Its output is raw, unrescaled precision/recall/F1 with uniform token weights, and may differ slightly from the upstream `bert-score` package. Record the checkpoint and layer with results.
 
-Keep extracted assets in `models/` inside the repository (ignored by Git). Use `models/factcc/` for FactCC, `models/hf-cache/` for MiniCheck, and `models/alignscore/AlignScore-base.ckpt` for the AlignScore checkpoint. AlignScore needs the matching pretrained RoBERTa-base weights, tokenizer, and config as well. Put them in `models/roberta-base/`, or keep a complete `FacebookAI/roberta-base` snapshot in `models/hf-cache/`; the loader detects either arrangement so the same weights need not be copied twice. MiniCheck accepts either an intact Hub cache (do not flatten `models--...`, `snapshots`, `refs`, or `blobs`) or a directly extracted model folder. The cache loader can find a common enclosing `huggingface/hub` directory. Both metrics use NLTK sentence splitting. If approved, put NLTK data outside `src/`, at `models/nltk_data/tokenizers/punkt_tab/english/...`, and pass `--nltk_data_dir models/nltk_data`. The bundle does not redistribute NLTK data because the [NLTK data license inventory](https://github.com/nltk/nltk_data/blob/gh-pages/DATASET-LICENSES.md) currently lists it without a declared license. `--offline` prevents model downloads and makes missing assets fail locally.
+Keep extracted assets in `models/` inside the repository (ignored by Git). Use `models/factcc/` for FactCC, `models/hf-cache/` for MiniCheck, and `models/alignscore/AlignScore-base.ckpt` for the AlignScore checkpoint. AlignScore needs the matching pretrained RoBERTa-base weights, tokenizer, and config as well. Put them in `models/roberta-base/`, or keep a complete `FacebookAI/roberta-base` snapshot in `models/hf-cache/`; the loader detects either arrangement so the same weights need not be copied twice. MiniCheck and AlignScore also search recursively below the supplied path, so a directly extracted model folder may be nested under `models/hf-cache/` or an uploaded wrapper folder. The loader ignores Hub `blobs/` and `refs/` directories and chooses the complete model folder by model family. Both metrics use NLTK sentence splitting. If approved, put NLTK data outside `src/`, at `models/nltk_data/tokenizers/punkt_tab/english/...`, and pass `--nltk_data_dir models/nltk_data`. The bundle does not redistribute NLTK data because the [NLTK data license inventory](https://github.com/nltk/nltk_data/blob/gh-pages/DATASET-LICENSES.md) currently lists it without a declared license. `--offline` prevents model downloads and makes missing assets fail locally.
 
-The included MiniCheck FLAN-T5 adapter and AlignScore adapter can run together. They no longer import their upstream Python packages and use the shared PyTorch/Transformers stack. These are inference-only ports and should be score-checked against upstream before treating results as interchangeable. NLTK and its approved `punkt_tab` resource are still needed for sentence splitting. ROUGE and BERTScore compare a candidate summary to `human_sum`, not to the input document; the human-reference row is left null to avoid a misleading self-match of 1.0. FENICE pins Transformers ~=4.38.2 while this project targets >=4.56.2, and its upstream repository is CC BY-NC-SA 4.0, so obtain company licensing/compliance approval before using it for company work. QAFactEval has a legacy dependency/model stack; use an IT-provisioned compatible environment if it conflicts with the main one, then combine outputs by record ID.
+The included MiniCheck FLAN-T5 adapter and AlignScore adapter can run together. They no longer import their upstream Python packages and use the shared PyTorch/Transformers stack. These are inference-only ports and should be score-checked against upstream before treating results as interchangeable. NLTK and its approved `punkt_tab` resource are still needed for sentence splitting. ROUGE and BERTScore compare a candidate summary to `human_sum`, not to the input document; the human-reference row is left null to avoid a misleading self-match of 1.0. FENICE and QAFactEval are supported as optional upstream adapters, but not in the shared environment: FENICE pins Transformers ~=4.38.2 and QAFactEval uses an older QA/AllenNLP stack. Run each in an IT-provisioned compatible environment and combine outputs by record ID. FENICE explicitly extracts summary claims before NLI alignment; QAFactEval generates QA pairs and scores answer consistency. Both were developed primarily for English, so treat Vietnamese results as exploratory.
 
 ## Package layout and CLI
 
@@ -204,6 +204,11 @@ local model answers only `is_claim`. Accepted rows keep the verbatim claim,
 `start_char`, and `end_char`; no model paraphrase is used as the claim text.
 Headings and fragments can be written to a separate file:
 
+Claim extraction preserves each sentence, including colon-delimited heading
+subjects, by default. Use `--split_clauses` only as an explicit ablation: it
+can turn a heading such as `Tuoi Than: gap nhieu rac roi trong cong viec` into
+two incomplete candidates.
+
 ```text
 python -m src.evaluate.claim_extractor --backend gemini --model gemini-3.5-flash-lite --input data/batch_3_cleaned.jsonl --source_col input --summary_col output --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --error_output results/batch_3_claim_extraction_errors.jsonl --limit 1 --sleep_seconds 0.2
 ```
@@ -215,8 +220,13 @@ python -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash
 ```
 
 The local extractor uses the same two-stage contract by replacing
-`--backend gemini --model gemini-3.5-flash-lite` with
-`--backend local --model models/Qwen2.5-3B-Instruct`.
+`--backend gemini --model gemini-3.5-flash-lite` with a local instruction
+model, for example `--backend local --model models/Llama-3.2-3B-Instruct`.
+The parser accepts common local-model variations such as fenced JSON,
+`isClaim`, and boolean-like values, then makes at most one local repair
+attempt when the first response is malformed. Every accepted row records
+`claimness_raw_attempts` and `claimness_repair_attempted`; error rows retain
+the raw response in the error JSONL for diagnosis.
 
 The repository also supports a second-rater pass over the review JSONL. It
 uses the same five labels and writes `llm_label`, `llm_reason`,

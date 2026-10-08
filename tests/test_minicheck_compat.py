@@ -104,6 +104,29 @@ class MiniCheckCompatibilityTests(unittest.TestCase):
             self.assertIsNone(load_tokenizer.call_args.kwargs["cache_dir"])
             self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
 
+    def test_nested_extracted_model_folder_is_found_below_cache_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary) / "uploaded" / "hf-cache"
+            model_dir = cache_dir / "MiniCheck-Flan-T5-Large"
+            model_dir.mkdir(parents=True)
+            for filename in ("config.json", "model.safetensors", "spiece.model"):
+                (model_dir / filename).touch()
+            tokenizer = SimpleNamespace(eos_token="</s>")
+            model = MagicMock()
+            model.to.return_value = model
+            model.eval.return_value = model
+
+            with (
+                patch("src.evaluate._minicheck_compat.AutoTokenizer.from_pretrained", return_value=tokenizer) as load_tokenizer,
+                patch("src.evaluate._minicheck_compat.AutoModelForSeq2SeqLM.from_pretrained", return_value=model),
+                patch.dict("os.environ", {}, clear=True),
+            ):
+                MiniCheckCompatScorer(cache_dir=cache_dir, device="cpu")
+
+            self.assertEqual(load_tokenizer.call_args.args[0], str(model_dir.resolve()))
+            self.assertIsNone(load_tokenizer.call_args.kwargs["cache_dir"])
+            self.assertTrue(load_tokenizer.call_args.kwargs["local_files_only"])
+
 
 if __name__ == "__main__":
     unittest.main()

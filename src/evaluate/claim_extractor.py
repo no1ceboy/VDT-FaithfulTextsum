@@ -9,9 +9,11 @@ verification stage never has to trust a model-generated paraphrase.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,7 +24,6 @@ from .llm_claim_judge import (
     GeminiClaimJudge,
     JudgeError,
     LocalClaimJudge,
-    _extract_json_object,
 )
 from .claim_recovery import read_jsonl
 
@@ -39,7 +40,16 @@ Return is_claim=false for a title or topic heading, section label, fragment
 without a proposition, instruction, formatting artifact, or other text that
 does not have a truth value. A heading that itself states a complete factual
 proposition can be a claim. Do not judge whether the claim is true; only judge
-whether it is a claim. Never rewrite the candidate."""
+whether it is a claim. Never rewrite the candidate.
+A prediction or generalization is still a claim. For example, a sentence
+asserting that people born in the Year of the Monkey will face many problems
+at work is_claim=true; do not mark it false merely because it is horoscope-like
+or describes a broad group.
+
+Your entire response must be exactly one JSON object on one line. Do not emit
+chain-of-thought, <think>, <analysis>, or other reasoning blocks. Do not use
+Markdown fences, prose, or a Python dictionary. Use the JSON boolean true or
+false for is_claim, not a quoted word."""
 
 CLAIMNESS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -70,7 +80,7 @@ class ClaimnessGenerator(Protocol):
         """Return structured model output as text."""
 
 
-def candidate_spans(summary: str, *, split_clauses: bool = True) -> list[dict[str, Any]]:
+def candidate_spans(summary: str, *, split_clauses: bool = False) -> list[dict[str, Any]]:
     """Split a summary and recover exact character spans in original text."""
     candidates = split_claims(summary, split_clauses=split_clauses)
     spans: list[dict[str, Any]] = []
@@ -111,13 +121,112 @@ SUMMARY CONTEXT:
 Return only the JSON object requested by the schema. Do not add or rewrite text."""
 
 
+def _claimness_repair_prompt(
+    summary: str, candidate: str, start: int, end: int, previous_response: str
+) -> str:
+    """Ask a local instruct model once to repair an invalid structured answer."""
+    return f"""The previous response did not follow the required output format.
+Reclassify the same candidate and return exactly one JSON object with these keys:
+is_claim (JSON boolean), unit_type, and reason. Do not copy the previous format.
+Do not return Markdown, prose, a Python dictionary, or any <think>/<analysis>
+reasoning block. Any text outside the JSON object is invalid.
+
+CANDIDATE (copied from the summary, characters {start}:{end}):
+<candidate>
+{candidate}
+</candidate>
+
+SUMMARY CONTEXT:
+<summary>
+{summary}
+</summary>
+
+PREVIOUS INVALID RESPONSE:
+<previous_response>
+{previous_response}
+</previous_response>"""
+
+
 def parse_claimness(text: str) -> dict[str, Any]:
-    value = _extract_json_object(text)
-    raw_is_claim = value.get("is_claim")
+    """Parse claimness without accepting model reasoning as structured output.
+
+    A local instruct model may use a Markdown fence, Python booleans, or a
+    short ``is_claim: false`` answer. Those narrow forms are tolerated, but
+    the response must otherwise contain only the structured answer. A
+    thinking/reasoning block or prose before/after the answer is invalid; the
+    caller may make its bounded repair attempt and otherwise records an error.
+    """
+    raw_text = str(text).strip()
+    if not raw_text:
+        raise JudgeError("model returned an empty claimness response")
+    if re.search(
+        r"<\s*/?\s*(?:think|analysis|reasoning|thought)\s*>"
+        r"|<\|(?:begin|end)_(?:of_)?(?:think|thinking|analysis|reasoning|thought)\|>",
+        raw_text,
+        flags=re.IGNORECASE,
+    ):
+        raise JudgeError("model emitted a thinking/reasoning block; response is invalid")
+
+    cleaned = raw_text
+    if cleaned.startswith("```"):
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL
+        )
+        if fenced is None:
+            raise JudgeError("model returned an invalid Markdown wrapper around claimness JSON")
+        cleaned = fenced.group(1).strip()
+
+    value: Any = None
+    short_answer = False
+    json_error: Exception | None = None
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        json_error = exc
+        try:
+            value = ast.literal_eval(cleaned)
+        except (SyntaxError, ValueError, TypeError):
+            short_match = re.fullmatch(
+                r"(?:is[_ -]?claim|is claim)\s*(?:is|=|:)\s*[\"']?"
+                r"(true|false|yes|no|1|0)[\"']?",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if short_match:
+                value = {"is_claim": short_match.group(1)}
+                short_answer = True
+            else:
+                raise JudgeError(
+                    "model did not return exactly one JSON object without reasoning or prose"
+                ) from json_error
+    if not isinstance(value, dict):
+        raise JudgeError("model JSON response was not an object")
+
+    if not short_answer:
+        has_unit_type = any(key in value for key in ("unit_type", "unitType"))
+        has_reason = any(key in value for key in ("reason", "explanation"))
+        missing = []
+        if not has_unit_type:
+            missing.append("unit_type")
+        if not has_reason:
+            missing.append("reason")
+        if missing:
+            raise JudgeError(
+                "model JSON response is missing required claimness keys: "
+                + ", ".join(missing)
+            )
+
+    raw_is_claim = None
+    for key in ("is_claim", "isClaim", "is claim"):
+        if key in value:
+            raw_is_claim = value[key]
+            break
     if isinstance(raw_is_claim, bool):
         is_claim = raw_is_claim
+    elif isinstance(raw_is_claim, int) and raw_is_claim in {0, 1}:
+        is_claim = bool(raw_is_claim)
     elif isinstance(raw_is_claim, str):
-        normalized = raw_is_claim.strip().casefold()
+        normalized = raw_is_claim.strip().casefold().strip(" .,!\"'")
         if normalized in {"yes", "true", "1"}:
             is_claim = True
         elif normalized in {"no", "false", "0"}:
@@ -126,12 +235,12 @@ def parse_claimness(text: str) -> dict[str, Any]:
             raise JudgeError(f"invalid is_claim value: {raw_is_claim!r}")
     else:
         raise JudgeError("model did not return boolean is_claim")
-    unit_type = str(value.get("unit_type", "other")).strip().casefold().replace("-", "_")
+    unit_type = str(value.get("unit_type", value.get("unitType", "other"))).strip().casefold().replace("-", "_")
     if unit_type not in UNIT_TYPES:
         unit_type = "other"
     if is_claim:
         unit_type = "claim"
-    reason = str(value.get("reason", "")).strip()
+    reason = str(value.get("reason", value.get("explanation", ""))).strip()
     return {"is_claim": is_claim, "unit_type": unit_type, "reason": reason}
 
 
@@ -140,14 +249,34 @@ class ClaimnessClassifier:
         self.generator = generator
         self.backend_name = generator.backend_name
         self.model_name = generator.model_name
+        self.last_raw_response = ""
+        self.last_raw_attempts: list[str] = []
 
     def classify(self, summary: str, candidate: str, start: int, end: int) -> dict[str, Any]:
+        self.last_raw_response = ""
+        self.last_raw_attempts = []
         raw = self.generator.generate_text(
             CLAIMNESS_SYSTEM_PROMPT,
             _claimness_prompt(summary, candidate, start, end),
         )
-        result = parse_claimness(raw)
-        result["raw_response"] = raw
+        self.last_raw_response = raw
+        raw_attempts = [raw]
+        self.last_raw_attempts = raw_attempts.copy()
+        try:
+            result = parse_claimness(raw)
+        except JudgeError:
+            if self.backend_name != "local":
+                raise
+            repaired = self.generator.generate_text(
+                CLAIMNESS_SYSTEM_PROMPT,
+                _claimness_repair_prompt(summary, candidate, start, end, raw),
+            )
+            raw_attempts.append(repaired)
+            self.last_raw_attempts = raw_attempts.copy()
+            self.last_raw_response = "\n--- repair attempt ---\n".join(raw_attempts)
+            result = parse_claimness(repaired)
+        result["raw_response"] = raw_attempts[-1]
+        result["raw_attempts"] = raw_attempts
         return result
 
 
@@ -197,6 +326,8 @@ def _base_output_row(
         "claimness_model": classifier.model_name,
         "claimness_status": "ok",
         "claimness_raw": result.get("raw_response", ""),
+        "claimness_raw_attempts": result.get("raw_attempts", []),
+        "claimness_repair_attempted": len(result.get("raw_attempts", [])) > 1,
     }
     return output
 
@@ -261,6 +392,9 @@ def extract_rows(
                         "claimness_model": classifier.model_name,
                         "claimness_status": "error",
                         "claimness_error": f"{type(exc).__name__}: {exc}",
+                        "claimness_raw": classifier.last_raw_response,
+                        "claimness_raw_attempts": classifier.last_raw_attempts.copy(),
+                        "claimness_repair_attempted": len(classifier.last_raw_attempts) > 1,
                     }
                 )
                 LOGGER.error("document %d candidate %d failed: %s", document_index, span["candidate_index"], exc)
@@ -337,7 +471,16 @@ def main() -> int:
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--allow_download", action="store_true")
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--no_split_clauses", action="store_true")
+    parser.add_argument(
+        "--split_clauses",
+        action="store_true",
+        help="Opt in to colon/semicolon splitting; may detach a heading subject from its predicate.",
+    )
+    parser.add_argument(
+        "--no_split_clauses",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--sleep_seconds", type=float, default=0.0)
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
@@ -346,6 +489,8 @@ def main() -> int:
         parser.error("--sleep_seconds must be non-negative")
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
+    if args.split_clauses and args.no_split_clauses:
+        parser.error("--split_clauses and --no_split_clauses cannot be used together")
     rows = read_jsonl(Path(args.input))
     if not rows:
         raise ValueError(f"No rows found in {args.input}")
@@ -356,7 +501,7 @@ def main() -> int:
         source_col=args.source_col,
         summary_col=args.summary_col,
         limit=args.limit,
-        split_clauses=not args.no_split_clauses,
+        split_clauses=args.split_clauses,
         sleep_seconds=args.sleep_seconds,
     )
     _write_jsonl(claims, Path(args.output))

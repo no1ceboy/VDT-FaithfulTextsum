@@ -14,6 +14,7 @@ results from this port as interchangeable in a research result.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Sequence
@@ -23,6 +24,8 @@ import torch
 from torch import Tensor
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from ._local_model_paths import find_model_dir, has_complete_transformers_files
+
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_MODEL = "flan-t5-large"
@@ -31,6 +34,40 @@ _NO_SUPPORT_TOKEN_ID = 3
 _SUPPORT_TOKEN_ID = 209
 _DEFAULT_MAX_LENGTH = 2048
 _DEFAULT_SOURCE_CHUNK_WORDS = 500
+_MINICHECK_TOKENIZER_FILENAMES = ("tokenizer.json", "spiece.model", "tokenizer.model")
+
+
+def _is_minicheck_model_dir(path: Path) -> bool:
+    """Recognize a complete MiniCheck FLAN-T5 model folder."""
+    if not has_complete_transformers_files(
+        path, tokenizer_filenames=_MINICHECK_TOKENIZER_FILENAMES
+    ):
+        return False
+
+    # A transferred cache can contain several models.  Use the config to
+    # avoid accidentally selecting RoBERTa or another encoder as MiniCheck.
+    # Empty test fixtures and unusual but loadable configs remain acceptable;
+    # Transformers will provide the definitive validation during loading.
+    try:
+        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    model_type = str(config.get("model_type", "")).lower()
+    if model_type and model_type not in {"t5", "mt5", "longt5"}:
+        return False
+    architectures = config.get("architectures") or []
+    if architectures and not any("t5" in str(value).lower() for value in architectures):
+        return False
+    return True
+
+
+def _resolve_minicheck_model_dir(cache_dir: str | Path) -> Path | None:
+    """Find MiniCheck in a direct folder, wrapped archive, or Hub cache."""
+    return find_model_dir(
+        cache_dir,
+        is_complete=_is_minicheck_model_dir,
+        preferred_tokens=("minicheck-flan-t5-large", "minicheck", "flan-t5", "t5"),
+    )
 
 
 def _source_sentences(text: str) -> list[str]:
@@ -129,15 +166,11 @@ class MiniCheckCompatScorer:
         offline = os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         model_reference = _MODEL_ID
         cache_path = Path(cache_dir) if cache_dir is not None else None
-        if cache_path is not None and (cache_path / "config.json").is_file():
-            weight_files = (
-                "model.safetensors",
-                "pytorch_model.bin",
-                "model.safetensors.index.json",
-                "pytorch_model.bin.index.json",
-            )
-            if any((cache_path / filename).is_file() for filename in weight_files):
-                model_reference = str(cache_path.resolve())
+        if cache_path is not None:
+            local_model_dir = _resolve_minicheck_model_dir(cache_path)
+            if local_model_dir is not None:
+                logger.info("Using MiniCheck model folder: %s", local_model_dir)
+                model_reference = str(local_model_dir)
                 cache_path = None
                 offline = True
         load_args = {
@@ -158,10 +191,10 @@ class MiniCheckCompatScorer:
                     "MiniCheck could not load its model from "
                     f"{cache_description}. The cache must contain a complete snapshot for "
                     "lytang/MiniCheck-Flan-T5-Large (config, tokenizer, and model weights). "
-                    "Either pass --hf_cache_dir pointing to the Hugging Face cache root "
-                    "containing models--lytang--MiniCheck-Flan-T5-Large, or point it directly "
-                    "at an extracted model folder containing config.json, model weights, and "
-                    "tokenizer files. Do not point inside a cache snapshots/ or blobs/ folder."
+                    "The loader searches recursively under --hf_cache_dir, so a directly "
+                    "extracted folder may be nested there. Alternatively pass the folder "
+                    "itself. It must contain config.json, model weights, and tokenizer files; "
+                    "do not point inside a cache blobs/ folder."
                 ) from exc
             raise
         self.model.to(self.device).eval()
