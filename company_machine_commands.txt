@@ -11,8 +11,8 @@ python3 -m src.data.clean_dataset \
   --report results/training_cleaning.json \
   --audit_log results/training_cleaning.audit.jsonl
 
-# CASE 02 - DIRECT ATOMIC CLAIM EXTRACTION (local GPU smoke test)
-# Remove --limit 1 for the full dataset. For id/text/summary data, use
+# CASE 02 - DIRECT ATOMIC CLAIM EXTRACTION (local GPU; full dataset)
+# Add --limit N only for a smoke test. For id/text/summary data, use
 # --source_col text --summary_col summary and change only the input path.
 python3 -m src.evaluate.atomic_claims \
   --backend local \
@@ -26,8 +26,7 @@ python3 -m src.evaluate.atomic_claims \
   --device cuda \
   --dtype bfloat16 \
   --model_batch_size 8 \
-  --top_k 3 \
-  --limit 1
+  --top_k 3
 
 # CASE 03 - JUDGE THE ATOMIC CLAIMS (local GPU)
 python3 -m src.evaluate.llm_claim_judge \
