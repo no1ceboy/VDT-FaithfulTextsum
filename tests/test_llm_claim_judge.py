@@ -47,6 +47,16 @@ class LLMClaimJudgeTests(unittest.TestCase):
         self.assertEqual(result["label"], "not_supported")
         self.assertEqual(result["confidence"], 0.2)
 
+    def test_parse_multiple_evidence_quotes_keeps_legacy_first_quote(self) -> None:
+        result = parse_judgment(
+            '{"label":"supported","reason":"Both source sentences provide evidence.",'
+            '"evidence_quotes":[{"sentence_index":1,"quote":"First fact."},'
+            '{"sentence_index":4,"quote":"Second fact."}],"confidence":0.8}'
+        )
+        self.assertEqual(len(result["evidence_quotes"]), 2)
+        self.assertEqual(result["evidence_quotes"][1]["sentence_index"], 4)
+        self.assertEqual(result["evidence_quote"], "First fact.")
+
     def test_parse_judgment_rejects_reasoning_or_embedded_json(self) -> None:
         responses = (
             '<think>First I will inspect the source.</think>\n'

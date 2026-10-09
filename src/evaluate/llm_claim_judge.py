@@ -18,6 +18,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any, Protocol
@@ -44,9 +45,11 @@ Use exactly one label:
 - unclear: the source or claim is genuinely ambiguous and a careful reviewer cannot decide.
 - not_a_claim: a heading, label, fragment, topic name, or other text that does not assert a factual proposition.
 
-Return a short reason, one short verbatim evidence quote when available, and a
-confidence from 0 to 1. Do not infer that a claim is supported merely because
-it shares words with the source."""
+Return a short reason, every short verbatim evidence quote that supports the
+decision when available, and a confidence from 0 to 1. Return evidence_quotes
+as an array of objects with sentence_index and quote. Use an empty array when
+no evidence quote applies. Do not infer that a claim is supported merely
+because it shares words with the source."""
 
 JUDGMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -60,9 +63,27 @@ JUDGMENT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "A concise explanation for the label.",
         },
+        "evidence_quotes": {
+            "type": "array",
+            "description": "All short verbatim source quotes supporting the decision.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "sentence_index": {
+                        "type": "integer",
+                        "description": "Zero-based source sentence index when known.",
+                    },
+                    "quote": {
+                        "type": "string",
+                        "description": "A short verbatim quote from the source.",
+                    },
+                },
+                "required": ["sentence_index", "quote"],
+            },
+        },
         "evidence_quote": {
             "type": "string",
-            "description": "A short verbatim quote from the source, or an empty string if none applies.",
+            "description": "Legacy single-quote field accepted for compatibility.",
         },
         "confidence": {
             "type": "number",
@@ -71,7 +92,7 @@ JUDGMENT_SCHEMA: dict[str, Any] = {
             "description": "Confidence in the label from 0 to 1.",
         },
     },
-    "required": ["label", "reason", "evidence_quote", "confidence"],
+    "required": ["label", "reason", "evidence_quotes", "confidence"],
 }
 
 _LABEL_ALIASES = {
@@ -141,7 +162,11 @@ def _evidence_text(row: dict[str, Any]) -> str:
         text = str(item.get("text", "")).strip()
         score = item.get("retrieval_score", "")
         if text:
-            lines.append(f"[{index}; retrieval_score={score}] {text}")
+            sentence_index = item.get("sentence_index", "")
+            lines.append(
+                f"[evidence_index={index}; source_sentence_index={sentence_index}; "
+                f"retrieval_score={score}] {text}"
+            )
     return "\n".join(lines) or "(No retrieved evidence was provided.)"
 
 
@@ -153,12 +178,23 @@ def build_judge_prompt(row: dict[str, Any]) -> str:
         raise ValueError("claim row has an empty source")
     if not claim:
         raise ValueError("claim row has an empty claim")
+    parent_claim = str(row.get("parent_claim", "")).strip()
+    atomic_surface = str(row.get("atomic_surface_text", "")).strip()
+    context = ""
+    if parent_claim:
+        context += f"\nPARENT CLAIM:\n<parent_claim>\n{parent_claim}\n</parent_claim>\n"
+    if atomic_surface and atomic_surface != claim:
+        context += (
+            "\nEXACT ATOMIC SPAN FROM PARENT:\n<atomic_surface>\n"
+            f"{atomic_surface}\n</atomic_surface>\n"
+        )
     return f"""Classify the following claim using the labels and rules in the system instruction.
 
 CLAIM:
 <claim>
 {claim}
 </claim>
+{context}
 
 RETRIEVED EVIDENCE (ranking aid only):
 <evidence>
@@ -177,7 +213,7 @@ def _judge_repair_prompt(row: dict[str, Any], previous_response: str) -> str:
     return f"""The previous judgment did not follow the required output format.
 Re-evaluate the same claim against the same source and return exactly one JSON
 object with these keys:
-label, reason, evidence_quote, confidence.
+label, reason, evidence_quotes, confidence.
 The label must be one of supported, contradicted, not_supported, unclear, or
 not_a_claim. Confidence must be a JSON number from 0 to 1. Do not return
 Markdown, prose, a Python dictionary, or any <think>/<analysis> reasoning
@@ -230,7 +266,7 @@ def _parse_structured_object(text: str) -> dict[str, Any]:
 def parse_judgment(text: str) -> dict[str, Any]:
     """Parse and validate a model's structured judgment."""
     value = _parse_structured_object(text)
-    required = ("label", "reason", "evidence_quote", "confidence")
+    required = ("label", "reason", "confidence")
     missing = [key for key in required if key not in value]
     if missing:
         raise JudgeError(
@@ -243,7 +279,44 @@ def parse_judgment(text: str) -> dict[str, Any]:
     reason = str(value.get("reason", "")).strip()
     if not reason:
         raise JudgeError("model returned an empty judgment reason")
-    quote = str(value.get("evidence_quote", "")).strip()
+
+    raw_quotes = value.get("evidence_quotes")
+    if raw_quotes is None:
+        if "evidence_quote" not in value:
+            raise JudgeError(
+                "model JSON response is missing required judgment key: evidence_quotes"
+            )
+        legacy_quote = str(value.get("evidence_quote", "")).strip()
+        raw_quotes = [] if not legacy_quote else [{"sentence_index": None, "quote": legacy_quote}]
+    if not isinstance(raw_quotes, list):
+        raise JudgeError("model evidence_quotes must be an array")
+    evidence_quotes: list[dict[str, Any]] = []
+    for index, raw_quote in enumerate(raw_quotes):
+        if isinstance(raw_quote, str):
+            sentence_index = None
+            quote = raw_quote.strip()
+        elif isinstance(raw_quote, dict):
+            sentence_index = raw_quote.get("sentence_index")
+            if sentence_index is None:
+                sentence_index = raw_quote.get("source_sentence_index")
+            quote = str(raw_quote.get("quote", raw_quote.get("evidence_quote", ""))).strip()
+            if sentence_index is not None:
+                if isinstance(sentence_index, bool):
+                    raise JudgeError(f"evidence quote {index} has an invalid sentence_index")
+                try:
+                    sentence_index = int(sentence_index)
+                except (TypeError, ValueError) as exc:
+                    raise JudgeError(
+                        f"evidence quote {index} has an invalid sentence_index"
+                    ) from exc
+                if sentence_index < 0:
+                    raise JudgeError(f"evidence quote {index} has a negative sentence_index")
+        else:
+            raise JudgeError(f"evidence quote {index} is not a string or object")
+        if not quote:
+            raise JudgeError(f"evidence quote {index} is empty")
+        evidence_quotes.append({"sentence_index": sentence_index, "quote": quote})
+
     confidence_value = value.get("confidence")
     try:
         confidence = float(confidence_value)
@@ -254,9 +327,25 @@ def parse_judgment(text: str) -> dict[str, Any]:
     return {
         "label": label,
         "reason": reason,
-        "evidence_quote": quote,
+        "evidence_quotes": evidence_quotes,
+        "evidence_quote": evidence_quotes[0]["quote"] if evidence_quotes else "",
         "confidence": confidence,
     }
+
+
+def _quote_matches_source(quote: str, source: str) -> bool:
+    normalized_quote = " ".join(unicodedata.normalize("NFC", quote).split())
+    normalized_source = " ".join(unicodedata.normalize("NFC", source).split())
+    return bool(normalized_quote) and normalized_quote in normalized_source
+
+
+def _validate_evidence_quotes(judgment: dict[str, Any], row: dict[str, Any]) -> None:
+    """Ensure reported quotes are verbatim source evidence, not inventions."""
+    source = str(row.get("source", ""))
+    for index, item in enumerate(judgment.get("evidence_quotes", [])):
+        quote = str(item.get("quote", "")).strip()
+        if quote and not _quote_matches_source(quote, source):
+            raise JudgeError(f"evidence quote {index} is not a verbatim source substring")
 
 
 class GeminiClaimJudge:
@@ -361,6 +450,7 @@ class GeminiClaimJudge:
         self.last_raw_response = text
         self.last_raw_attempts = [text]
         judgment = parse_judgment(text)
+        _validate_evidence_quotes(judgment, row)
         judgment["raw_response"] = text
         judgment["raw_attempts"] = [text]
         return judgment
@@ -495,6 +585,7 @@ class LocalClaimJudge:
         self.last_raw_attempts = attempts.copy()
         try:
             judgment = parse_judgment(text)
+            _validate_evidence_quotes(judgment, row)
         except JudgeError:
             repaired = self.generate_text(
                 JUDGE_SYSTEM_PROMPT,
@@ -504,6 +595,7 @@ class LocalClaimJudge:
             self.last_raw_attempts = attempts.copy()
             self.last_raw_response = "\n--- repair attempt ---\n".join(attempts)
             judgment = parse_judgment(repaired)
+            _validate_evidence_quotes(judgment, row)
         judgment["raw_response"] = attempts[-1]
         judgment["raw_attempts"] = attempts
         return judgment
@@ -522,6 +614,10 @@ def _annotated_row(
     error_message: str | None = None,
 ) -> dict[str, Any]:
     output = dict(row)
+    evidence_quotes = judgment.get("evidence_quotes", []) if judgment else []
+    if not evidence_quotes and judgment and judgment.get("evidence_quote"):
+        evidence_quotes = [{"sentence_index": None, "quote": judgment["evidence_quote"]}]
+    first_quote = evidence_quotes[0].get("quote", "") if evidence_quotes else ""
     output.update(
         {
             "judge_backend": backend,
@@ -530,7 +626,8 @@ def _annotated_row(
             "judge_error": error_message or "",
             "llm_label": judgment.get("label", "") if judgment else "",
             "llm_reason": judgment.get("reason", "") if judgment else "",
-            "llm_evidence_quote": judgment.get("evidence_quote", "") if judgment else "",
+            "llm_evidence_quote": first_quote,
+            "llm_evidence_quotes": evidence_quotes,
             "llm_confidence": judgment.get("confidence") if judgment else None,
             "llm_raw": judgment.get("raw_response", "") if judgment else "",
             "llm_raw_attempts": judgment.get("raw_attempts", []) if judgment else [],

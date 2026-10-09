@@ -4,13 +4,15 @@ This is an interpretable companion to ``run_eval``.  It does not claim to
 extract objective world facts.  It splits a summary into claim-like units,
 retrieves source sentences that may support each unit, and optionally scores
 the full source/claim pair with Vietnamese mFACT.  The retrieved evidence is
-included for human review; lexical retrieval is only a ranking heuristic.
+included for human review; lexical and embedding retrieval are ranking
+heuristics only.
 
 The implementation is intentionally dependency-light and CPU-friendly:
-sentence splitting and retrieval use the standard library, and mFACT is
-loaded once and evaluated in small batches.  A binary mFACT score cannot by
-itself distinguish contradiction from unsupported content, so automatic
-``needs_review`` flags must not be reported as confirmed errors.
+sentence splitting and lexical retrieval use the standard library, while the
+optional embedding retriever reuses the existing PyTorch/Transformers stack.
+mFACT is loaded once and evaluated in small batches.  A binary mFACT score
+cannot by itself distinguish contradiction from unsupported content, so
+automatic ``needs_review`` flags must not be reported as confirmed errors.
 """
 
 from __future__ import annotations
@@ -78,6 +80,143 @@ def _recall(query: set[str], candidate: set[str]) -> float:
     return len(query & candidate) / len(query)
 
 
+class EmbeddingEvidenceRetriever:
+    """Offline sentence retriever backed by an existing Transformers encoder.
+
+    This is a retrieval component only.  Its cosine score is evidence ranking
+    signal, not an entailment or contradiction decision.
+    """
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        *,
+        device: str = "auto",
+        dtype: str = "auto",
+        batch_size: int = 8,
+        max_length: int = 512,
+        query_prefix: str = "",
+        passage_prefix: str = "",
+    ) -> None:
+        if batch_size < 1 or max_length < 1:
+            raise ValueError("embedding batch_size and max_length must be positive")
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Embedding retrieval requires the existing torch and transformers environment"
+            ) from exc
+
+        path = Path(model_path)
+        if not path.is_dir():
+            raise FileNotFoundError(f"Embedding model folder not found: {path}")
+        if not (path / "config.json").is_file():
+            raise FileNotFoundError(
+                f"{path} is not a complete local embedding model: config.json is missing"
+            )
+        if not any(
+            (path / filename).is_file()
+            for filename in (
+                "model.safetensors",
+                "pytorch_model.bin",
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            )
+        ):
+            raise FileNotFoundError(
+                f"{path} is not a complete local embedding model: model weights are missing"
+            )
+        if not any(
+            (path / filename).is_file()
+            for filename in (
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "tokenizer.model",
+                "vocab.txt",
+                "vocab.json",
+                "spiece.model",
+            )
+        ):
+            raise FileNotFoundError(
+                f"{path} is not a complete local embedding model: tokenizer files are missing"
+            )
+        self.torch = torch
+        self.model_path = str(path)
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("--embedding_device cuda was requested but CUDA is unavailable")
+        self.device = torch.device(device)
+
+        if self.device.type == "cpu" or dtype == "float32":
+            torch_dtype = torch.float32
+        elif dtype == "bfloat16" and torch.cuda.is_bf16_supported():
+            torch_dtype = torch.bfloat16
+        elif dtype in {"float16", "bfloat16"}:
+            torch_dtype = torch.float16
+        elif dtype == "auto":
+            torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        else:
+            raise ValueError(f"Unsupported embedding dtype: {dtype}")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
+        if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model = AutoModel.from_pretrained(
+            str(path), local_files_only=True, torch_dtype=torch_dtype
+        )
+        self.model.to(self.device)
+        self.model.eval()
+        self._passage_cache: dict[tuple[str, ...], Any] = {}
+
+    def _encode(self, texts: Sequence[str]) -> Any:
+        if not texts:
+            return self.torch.empty((0, 1))
+        batches: list[Any] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = list(texts[start : start + self.batch_size])
+            inputs = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
+            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            with self.torch.inference_mode():
+                outputs = self.model(**inputs)
+            hidden = outputs.last_hidden_state
+            mask = inputs.get("attention_mask")
+            if mask is None:
+                pooled = hidden.mean(dim=1)
+            else:
+                weights = mask.unsqueeze(-1).to(hidden.dtype)
+                pooled = (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+            batches.append(self.torch.nn.functional.normalize(pooled, p=2, dim=1).cpu())
+        return self.torch.cat(batches, dim=0)
+
+    def score_sentences(self, sentences: Sequence[str], query: str) -> list[float]:
+        sentence_tuple = tuple(str(sentence) for sentence in sentences)
+        passage_embeddings = self._passage_cache.get(sentence_tuple)
+        if passage_embeddings is None:
+            passage_embeddings = self._encode(
+                [self.passage_prefix + sentence for sentence in sentence_tuple]
+            )
+            self._passage_cache[sentence_tuple] = passage_embeddings
+        query_embedding = self._encode([self.query_prefix + str(query)])
+        if not len(sentence_tuple):
+            return []
+        return [
+            float(score)
+            for score in (passage_embeddings @ query_embedding[0]).tolist()
+        ]
+
+
 def evidence_overlap(claim: str, source_sentence: str) -> dict[str, float]:
     """Return cheap lexical recall features used only to rank evidence."""
     claim_tokens = set(_tokens(claim))
@@ -93,10 +232,24 @@ def evidence_overlap(claim: str, source_sentence: str) -> dict[str, float]:
     }
 
 
-def retrieve_evidence(source: str, claim: str, top_k: int = 3) -> list[dict[str, Any]]:
-    """Return top source sentences for a claim using lexical retrieval."""
+def retrieve_evidence(
+    source: str,
+    claim: str,
+    top_k: int = 3,
+    *,
+    retrieval_mode: str = "lexical",
+    embedding_retriever: EmbeddingEvidenceRetriever | None = None,
+    embedding_weight: float = 0.5,
+) -> list[dict[str, Any]]:
+    """Return top source sentences using lexical, embedding, or hybrid ranking."""
     if top_k < 1:
         raise ValueError("top_k must be positive")
+    if retrieval_mode not in {"lexical", "embedding", "hybrid"}:
+        raise ValueError("retrieval_mode must be lexical, embedding, or hybrid")
+    if retrieval_mode != "lexical" and embedding_retriever is None:
+        raise ValueError("embedding_retriever is required for embedding and hybrid retrieval")
+    if not 0.0 <= embedding_weight <= 1.0:
+        raise ValueError("embedding_weight must be between 0 and 1")
     sentences = split_claims(source)
     if not sentences and str(source).strip():
         sentences = [str(source).strip()]
@@ -107,9 +260,26 @@ def retrieve_evidence(source: str, claim: str, top_k: int = 3) -> list[dict[str,
             {
                 "sentence_index": sentence_index,
                 "text": sentence,
+                "retrieval_method": retrieval_mode,
                 **{key: round(value, 6) for key, value in features.items()},
             }
         )
+    if retrieval_mode != "lexical":
+        assert embedding_retriever is not None
+        embedding_scores = embedding_retriever.score_sentences(sentences, claim)
+        for item, cosine_score in zip(candidates, embedding_scores):
+            embedding_retrieval_score = max(0.0, min(1.0, (cosine_score + 1.0) / 2.0))
+            lexical_score = float(item["retrieval_score"])
+            item["embedding_score"] = round(cosine_score, 6)
+            item["embedding_retrieval_score"] = round(embedding_retrieval_score, 6)
+            item["lexical_retrieval_score"] = round(lexical_score, 6)
+            item["retrieval_score"] = round(
+                embedding_retrieval_score
+                if retrieval_mode == "embedding"
+                else (1.0 - embedding_weight) * lexical_score
+                + embedding_weight * embedding_retrieval_score,
+                6,
+            )
     candidates.sort(key=lambda item: (-item["retrieval_score"], item["sentence_index"]))
     return candidates[:top_k]
 
@@ -125,12 +295,17 @@ def _audit_status(
     mfact_score: float | None,
     mfact_threshold: float,
     min_evidence_overlap: float,
+    retrieval_mode: str = "lexical",
 ) -> tuple[str, list[str]]:
     """Assign a cautious investigation status and explain its flags."""
     flags: list[str] = []
-    best_overlap = float(evidence[0]["retrieval_score"]) if evidence else 0.0
-    if not evidence or best_overlap < min_evidence_overlap:
-        flags.append("low_lexical_evidence")
+    best_retrieval = float(evidence[0]["retrieval_score"]) if evidence else 0.0
+    if not evidence or best_retrieval < min_evidence_overlap:
+        flag_name = {
+            "embedding": "low_embedding_evidence",
+            "hybrid": "low_hybrid_evidence",
+        }.get(retrieval_mode, "low_lexical_evidence")
+        flags.append(flag_name)
     if not _number_values(claim).issubset(_number_values(source)):
         if _number_values(claim):
             flags.append("claim_number_or_date_not_found")
@@ -153,6 +328,9 @@ def audit_records(
     split_clauses: bool = False,
     mfact_threshold: float = 0.5,
     min_evidence_overlap: float = 0.05,
+    retrieval_mode: str = "lexical",
+    embedding_retriever: EmbeddingEvidenceRetriever | None = None,
+    embedding_weight: float = 0.5,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Create claim rows and per-summary aggregates.
 
@@ -190,7 +368,14 @@ def audit_records(
                 raise RuntimeError("Claim scorer returned an unexpected number of scores")
 
         for item, score in zip(pending, scores):
-            evidence = retrieve_evidence(item["source"], item["claim"], top_k=top_k)
+            evidence = retrieve_evidence(
+                item["source"],
+                item["claim"],
+                top_k=top_k,
+                retrieval_mode=retrieval_mode,
+                embedding_retriever=embedding_retriever,
+                embedding_weight=embedding_weight,
+            )
             normalized_score = (
                 score if score is not None and math.isfinite(score) else None
             )
@@ -201,6 +386,7 @@ def audit_records(
                 normalized_score,
                 mfact_threshold,
                 min_evidence_overlap,
+                retrieval_mode,
             )
             claim_rows.append(
                 {
@@ -209,8 +395,11 @@ def audit_records(
                     "summary_col": summary_col,
                     "claim_index": item["claim_index"],
                     "claim_count": item["claim_count"],
+                    "source": item["source"],
                     "claim": item["claim"],
                     "evidence": evidence,
+                    "retrieval_mode": retrieval_mode,
+                    "embedding_weight": embedding_weight if retrieval_mode == "hybrid" else None,
                     "mfact_score": round(normalized_score, 6) if normalized_score is not None else None,
                     "mfact_pred": int(normalized_score >= mfact_threshold)
                     if normalized_score is not None
@@ -227,6 +416,7 @@ def audit_records(
         aggregates.append(
             {
                 "summary_col": summary_col,
+                "retrieval_mode": retrieval_mode,
                 "claims_total": len(group),
                 "claims_scored": len(finite_scores),
                 "mean_mfact": round(sum(finite_scores) / len(finite_scores), 6)
@@ -294,6 +484,26 @@ def _make_mfact_score_fn(args: argparse.Namespace) -> Callable[[list[str], list[
     return score_fn
 
 
+def _make_embedding_retriever(args: argparse.Namespace) -> EmbeddingEvidenceRetriever | None:
+    if args.retrieval_mode == "lexical":
+        return None
+    if not args.embedding_model_path:
+        raise ValueError(
+            "--embedding_model_path is required for --retrieval_mode "
+            f"{args.retrieval_mode}"
+        )
+    model_path = _project_path(args.embedding_model_path)
+    return EmbeddingEvidenceRetriever(
+        model_path,
+        device=args.embedding_device,
+        dtype=args.embedding_dtype,
+        batch_size=args.embedding_batch_size,
+        max_length=args.embedding_max_length,
+        query_prefix=args.embedding_query_prefix,
+        passage_prefix=args.embedding_passage_prefix,
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract claim-like units, retrieve source evidence, and audit summary behavior.",
@@ -308,6 +518,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu", help="mFACT device; CPU is the low-memory default")
     parser.add_argument("--batch_size", type=int, default=1, help="mFACT claim batch size")
     parser.add_argument("--top_k", type=int, default=3, help="Evidence sentences saved per claim")
+    parser.add_argument(
+        "--retrieval_mode",
+        choices=("lexical", "embedding", "hybrid"),
+        default="lexical",
+        help="Evidence ranking method; lexical is the dependency-free default",
+    )
+    parser.add_argument(
+        "--embedding_model_path",
+        help="Complete local Transformers encoder folder for embedding retrieval",
+    )
+    parser.add_argument("--embedding_device", default="auto")
+    parser.add_argument(
+        "--embedding_dtype",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        default="auto",
+    )
+    parser.add_argument("--embedding_batch_size", type=int, default=8)
+    parser.add_argument("--embedding_max_length", type=int, default=512)
+    parser.add_argument("--embedding_query_prefix", default="")
+    parser.add_argument("--embedding_passage_prefix", default="")
+    parser.add_argument("--embedding_weight", type=float, default=0.5)
     parser.add_argument("--mfact_threshold", type=float, default=0.5)
     parser.add_argument("--min_evidence_overlap", type=float, default=0.05)
     parser.add_argument("--split_clauses", action="store_true", help="Also split semicolon/colon-delimited clauses")
@@ -319,6 +550,10 @@ def _parse_args() -> argparse.Namespace:
         parser.error("Use either --summary_col or --summary_cols, not both")
     if args.batch_size < 1 or args.top_k < 1:
         parser.error("--batch_size and --top_k must be positive")
+    if args.embedding_batch_size < 1 or args.embedding_max_length < 1:
+        parser.error("embedding batch size and max length must be positive")
+    if not 0.0 <= args.embedding_weight <= 1.0:
+        parser.error("--embedding_weight must be between 0 and 1")
     if not 0 <= args.mfact_threshold <= 1 or not 0 <= args.min_evidence_overlap <= 1:
         parser.error("thresholds must be in [0, 1]")
     if args.limit is not None and args.limit < 1:
@@ -367,6 +602,7 @@ def main() -> int:
     summary_cols = _summary_columns(records, args.summary_col, args.summary_cols)
     _validate_records(records, [source_col, *summary_cols])
     score_fn = _make_mfact_score_fn(args)
+    embedding_retriever = _make_embedding_retriever(args)
     claim_rows, aggregates = audit_records(
         records,
         source_col,
@@ -376,6 +612,9 @@ def main() -> int:
         split_clauses=args.split_clauses,
         mfact_threshold=args.mfact_threshold,
         min_evidence_overlap=args.min_evidence_overlap,
+        retrieval_mode=args.retrieval_mode,
+        embedding_retriever=embedding_retriever,
+        embedding_weight=args.embedding_weight,
     )
     _write_outputs(claim_rows, aggregates, args.output)
     print(json.dumps(aggregates, ensure_ascii=False, indent=2))

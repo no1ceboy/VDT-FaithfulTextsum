@@ -142,6 +142,10 @@ claim failed. `src.evaluate.fact_audit` deterministically splits summaries into
 claim-like units, retrieves likely source evidence with lexical overlap, and
 optionally scores each full-source/claim pair with Vietnamese mFACT. It writes
 one JSONL row per claim plus `.summary.tsv` and `.summary.json` aggregates.
+For retrieval ablations, add `--retrieval_mode embedding` or `--retrieval_mode
+hybrid` together with `--embedding_model_path models/your-local-encoder`.
+The encoder is used only to rank candidate evidence; it does not replace the
+judge or mFACT.
 Retrieved evidence is a review aid, not proof of entailment; `needs_review` is
 not an automatic contradiction label.
 
@@ -196,48 +200,46 @@ non-proposition). The page's automatic flags and retrieval scores are review
 aids only; they are not human labels. Click **Download completed JSONL** when
 finished and keep the resulting file under `results/` for analysis.
 
-### LLM-assisted claim judgment
+### LLM-assisted atomic claim audit
 
-The first stage can now locate exact factual spans before verification. The
-splitter creates candidate spans in the original summary, and Gemini or a
-local model answers only `is_claim`. Accepted rows keep the verbatim claim,
-`start_char`, and `end_char`; no model paraphrase is used as the claim text.
-Headings and fragments can be written to a separate file:
+The primary workflow extracts atomic claims directly from the original
+source/summary JSONL. It does not first ask another model to decide whether a
+sentence is a claim. Each summary sentence-like unit is sent to the atomic
+decomposer, which must preserve every independently checkable proposition as
+an exact `atomic_surface_text` span. A heading or fragment may produce zero
+atoms, but it remains visible in the coverage output instead of disappearing.
 
-Claim extraction preserves each sentence, including colon-delimited heading
-subjects, by default. Use `--split_clauses` only as an explicit ablation: it
-can turn a heading such as `Tuoi Than: gap nhieu rac roi trong cong viec` into
-two incomplete candidates.
+For the canonical dataset (`id`, `text`, `summary`), run:
 
 ```text
-python -m src.evaluate.claim_extractor --backend gemini --model gemini-3.5-flash-lite --input data/batch_3_cleaned.jsonl --source_col input --summary_col output --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --error_output results/batch_3_claim_extraction_errors.jsonl --limit 1 --sleep_seconds 0.2
+python -m src.evaluate.atomic_claims \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --input data/batch_3_cleaned.jsonl \
+  --source_col text --summary_col summary \
+  --output results/batch_3_atomic_claims.gemini.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
+  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
+  --top_k 3 --limit 1 --sleep_seconds 0.2
 ```
 
-Remove `--limit 1` for the full input. Then verify only the recovered claims:
-
-```text
-python -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_claims.gemini.jsonl --output results/batch_3_claim_verdicts.gemini.jsonl --overwrite
-```
-
-The local extractor uses the same two-stage contract by replacing
-`--backend gemini --model gemini-3.5-flash-lite` with a local instruction
-model, for example `--backend local --model models/Llama-3.2-3B-Instruct`.
-The parser accepts common local-model variations such as fenced JSON,
-`isClaim`, and boolean-like values, then makes at most one local repair
-attempt when the first response is malformed. Every accepted row records
-`claimness_raw_attempts` and `claimness_repair_attempted`; error rows retain
-the raw response in the error JSONL for diagnosis.
+For the legacy source/summary layout, keep the same command and change only
+the columns, for example `--source_col input --summary_col output`. Remove
+`--limit 1` for the full input. The atomic JSONL contains only units with at
+least one atomic proposition, so it can be judged immediately. The coverage
+JSONL contains every summary unit, including `no_atomic_claims` and `error`
+rows, and is the file to inspect when checking extraction coverage.
 
 The repository also supports a second-rater pass over the review JSONL. It
 uses the same five labels and writes `llm_label`, `llm_reason`,
-`llm_evidence_quote`, and `llm_confidence`; it never overwrites
+`llm_evidence_quote`, `llm_evidence_quotes`, and `llm_confidence`; it never overwrites
 `human_label`. Gemini uses the standard-library HTTP client, so this path does
 not require installing the Google SDK. The configured model is
 `gemini-3.5-flash-lite`.
 
-The verification parser is strict for both backends: it requires all four
-judgment fields and rejects reasoning/prose around the object. A local model
-gets one bounded format-repair attempt; failed rows retain
+The verification parser is strict for both backends: it requires a label,
+reason, an `evidence_quotes` array, and confidence, and rejects
+reasoning/prose around the object. Each quote must be a verbatim substring of
+the source. A local model gets one bounded format-repair attempt; failed rows retain
 `llm_raw_attempts`, `llm_repair_attempted`, and `judge_error` in the output.
 
 The Gemini backend sends the source document and claim to Google's API. Use it
@@ -264,18 +266,65 @@ python -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B
 The local and Gemini backends use the same prompt and output fields, making
 their label distributions and disagreements directly comparable.
 
-Recover the factual claims after the LLM pass. This filters out
-`not_a_claim` rows without changing their original text; unresolved rows are
-written separately instead of being silently treated as claims:
+Each atomic row gets its own retrieved evidence list; the `verification_claim`
+may repeat an inherited subject so the judge can read the unit independently.
+After judging the atomic rows, aggregate them back to one parent row.
+Aggregation is deterministic and conservative: a contradicted atom wins, then
+`not_supported`, then `unclear`; a parent is supported only when all atoms are
+supported. The output retains all atomic judgments and all evidence quotes.
 
 ```text
-python -m src.evaluate.claim_recovery --input results/batch_3_manual_review_20.gemini.jsonl --label_col llm_label --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --unresolved_output results/batch_3_unresolved.gemini.jsonl
+python -m src.evaluate.atomic_claims \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --input data/batch_3_cleaned.jsonl \
+  --source_col input --summary_col output \
+  --output results/batch_3_atomic_claims.gemini.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
+  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
+  --top_k 3 --limit 1 --sleep_seconds 0.2
+
+python -m src.evaluate.llm_claim_judge \
+  --backend gemini --model gemini-3.5-flash-lite \
+  --input results/batch_3_atomic_claims.gemini.jsonl \
+  --output results/batch_3_atomic_verdicts.gemini.jsonl --overwrite
+
+python -m src.evaluate.atomic_aggregate \
+  --input results/batch_3_atomic_verdicts.gemini.jsonl \
+  --output results/batch_3_parent_verdicts.gemini.jsonl
 ```
 
-For human labels, use the same command with `--label_col human_label`. A
-`not_supported` row is still a claim—it is a proposition for which the source
-did not provide enough evidence. Only `not_a_claim` is removed from the
-factual-claim set.
+Remove `--limit 1` for the full run. For a local model, replace the first
+command's backend/model with `--backend local --model models/Qwen2.5-3B-Instruct`.
+The atomic decomposer uses the same local-only loading behavior as the judge.
+
+Lexical retrieval is the default and needs no extra model. An optional local
+Transformers encoder can rank evidence by cosine similarity without the
+`sentence-transformers` package. Use `--retrieval_mode embedding` when you
+want embedding-only retrieval, or `hybrid` to combine lexical overlap and
+embedding similarity (recommended for an ablation):
+
+```text
+python -m src.evaluate.atomic_claims \
+  --backend local --model models/Qwen2.5-3B-Instruct \
+  --input data/batch_3_cleaned.jsonl \
+  --source_col input --summary_col output \
+  --output results/batch_3_atomic_claims.hybrid.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.hybrid.jsonl \
+  --retrieval_mode hybrid \
+  --embedding_model_path models/your-local-encoder \
+  --embedding_device cuda --embedding_batch_size 8 \
+  --embedding_weight 0.5 --top_k 3
+```
+
+The embedding model is only a retriever: its cosine score is not an entailment
+or contradiction score. Keep the lexical and hybrid runs as separate result
+files when comparing evidence-retrieval ablations. The encoder folder must be
+complete (`config.json`, model weights, and tokenizer files), and is resolved
+relative to the repository root like the other local model paths.
+
+The older `claim_extractor` and `claim_recovery` modules remain available only
+for reproducing earlier artifacts. They are not part of the direct atomic
+workflow above and should not be run before atomic extraction.
 
 ## Reading the scores
 

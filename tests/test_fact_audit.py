@@ -54,11 +54,32 @@ class FactAuditTests(unittest.TestCase):
         )
 
         self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["source"], records[0]["source"])
         self.assertEqual(rows[0]["status"], "likely_supported")
         self.assertEqual(rows[1]["status"], "needs_review")
         self.assertIn("claim_number_or_date_not_found", rows[1]["flags"])
         self.assertEqual(aggregates[0]["likely_supported"], 1)
         self.assertEqual(aggregates[1]["needs_review"], 1)
+
+    def test_hybrid_retrieval_records_lexical_and_embedding_scores(self) -> None:
+        class FakeEmbeddingRetriever:
+            def score_sentences(self, sentences, query):
+                del query
+                return [0.1 + 0.2 * index for index, _ in enumerate(sentences)]
+
+        evidence = retrieve_evidence(
+            "Alpha event. Beta event.",
+            "Beta event.",
+            top_k=2,
+            retrieval_mode="hybrid",
+            embedding_retriever=FakeEmbeddingRetriever(),
+            embedding_weight=0.5,
+        )
+        self.assertEqual(evidence[0]["sentence_index"], 1)
+        self.assertEqual(evidence[0]["retrieval_method"], "hybrid")
+        self.assertIn("lexical_retrieval_score", evidence[0])
+        self.assertIn("embedding_score", evidence[0])
+        self.assertIn("embedding_retrieval_score", evidence[0])
 
 
 if __name__ == "__main__":

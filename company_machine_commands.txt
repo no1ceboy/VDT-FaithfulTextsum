@@ -1,441 +1,377 @@
-VDT-FaithfulTextsum company run
+# VDT-FaithfulTextsum: company-machine commands
 
-From the repo root, use the IT-approved environment. Do not pip-install or
-download models from Hugging Face. Merge the current code ZIP over the source;
-preserve `models/`.
+# CASE 01 - CLEAN LEGACY BATCH_3 (input/output; original is unchanged)
+python3 -m src.data.clean_dataset \
+  --input data/batch_3.jsonl \
+  --output data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --reference_col output \
+  --replacement_policy drop \
+  --drop_stale_token_lengths \
+  --report results/batch_3_cleaning.json \
+  --audit_log results/batch_3_cleaning.audit.jsonl
 
-Extract MiniCheck into the existing cache (the ZIP has files at its root):
+# CASE 02 - BASELINE EVALUATION (10-row smoke test; remove --limit for full run)
+python3 -m src.evaluate.run_eval \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --metrics factcc minicheck alignscore rouge \
+  --factcc_model_path models/factcc \
+  --hf_cache_dir models/hf-cache \
+  --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
+  --alignscore_backbone_path models/roberta-base \
+  --nltk_data_dir models/nltk_data \
+  --offline \
+  --device cuda \
+  --batch_size 1 \
+  --limit 10 \
+  --output results/batch_3_baseline_smoke.jsonl
 
-  python -m zipfile -e VDT-FaithfulTextsum-MiniCheck-Flan-T5-Large.zip models/hf-cache
+# CASE 03 - GENERATE SDS GRPO SUMMARIES (legacy SDS schema)
+CUDA_VISIBLE_DEVICES=0 python3 scripts/generate_summaries.py \
+  --model outputs/grpo_fft_base_maxsteps5000/final_model \
+  --input_jsonl /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
+  --output outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+  --summary_col grpo_sum \
+  --batch_size 1 \
+  --max_new_tokens 256 \
+  --max_input_tokens 4096
 
-The evaluator searches recursively below `models/hf-cache`, so these are also
-valid: `models/hf-cache/MiniCheck-Flan-T5-Large/` or an uploaded wrapper such
-as `models/hf-cache/uploaded/MiniCheck-Flan-T5-Large/`. The selected model
-folder must directly contain `config.json`, model weights, and `spiece.model`
-or `tokenizer.json`. Do not point at a `blobs/` directory.
+# CASE 04 - EVALUATE SDS GRPO OUTPUT
+python3 -m src.evaluate.run_eval \
+  --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+  --source_col source \
+  --summary_col grpo_sum \
+  --reference_col human_sum \
+  --metrics factcc minicheck alignscore rouge \
+  --factcc_model_path models/factcc \
+  --hf_cache_dir models/hf-cache \
+  --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
+  --alignscore_backbone_path models/roberta-base \
+  --nltk_data_dir models/nltk_data \
+  --offline \
+  --device cuda \
+  --batch_size 1 \
+  --output results/sds_grpo_fft_scored.jsonl
 
-Clean the loaded batch_3 dataset before training or generation. This writes a
-new file, leaves the original unchanged, and writes the report/audit under
-`results/`. The legacy fields are `input` and `output`:
+# CASE 05 - VIETNAMESE mFACT EVALUATION
+python3 -m src.evaluate.run_eval \
+  --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
+  --source_col source \
+  --summary_col grpo_sum \
+  --reference_col human_sum \
+  --metrics mfact rouge \
+  --mfact_model_path models/mfact-vi_VN \
+  --offline \
+  --device cpu \
+  --batch_size 1 \
+  --output results/sds_grpo_fft_mfact_scored.jsonl
 
-  python3 -m src.data.clean_dataset \
-    --input data/batch_3.jsonl \
-    --output data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --reference_col output \
-    --replacement_policy drop \
-    --drop_stale_token_lengths \
-    --report results/batch_3_cleaning.json \
-    --audit_log results/batch_3_cleaning.audit.jsonl
+# CASE 06 - RETRIEVAL-ONLY EVIDENCE BASELINE (20-row smoke test)
+python3 -m src.evaluate.fact_audit \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --no_mfact \
+  --top_k 3 \
+  --limit 20 \
+  --output results/batch_3_claim_audit.lexical.jsonl
 
-The cleaner replaces links with `[URL]`, removes decorative icons and
-separator lines, and drops empty/corrupted source rows. Do not add
-`--overwrite` on the first run; add it only when intentionally rerunning the
-same output path.
+# CASE 07 - RETRIEVAL-ONLY EVIDENCE WITH HYBRID EMBEDDINGS
+python3 -m src.evaluate.fact_audit \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --no_mfact \
+  --top_k 3 \
+  --limit 20 \
+  --retrieval_mode hybrid \
+  --embedding_model_path models/your-local-encoder \
+  --embedding_device cuda \
+  --embedding_weight 0.5 \
+  --output results/batch_3_claim_audit.hybrid.jsonl
 
-Use `data/batch_3_cleaned.jsonl` below as the input for later preparation:
+# CASE 08 - DIRECT ATOMIC CLAIMS (legacy input/output; use text/summary for new data)
+python3 -m src.evaluate.atomic_claims \
+  --backend gemini \
+  --model gemini-3.5-flash-lite \
+  --input data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --output results/batch_3_atomic_claims.gemini.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
+  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
+  --top_k 3 \
+  --limit 1 \
+  --sleep_seconds 0.2
 
-  python3 scripts/prepare_grpo_data.py \
-    --input data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --reference_col output \
-    --output_dir results/batch_3_grpo_splits \
-    --validation_fraction 0.1 \
-    --test_fraction 0.1 \
-    --seed 42
+# CASE 09 - JUDGE ATOMIC CLAIMS
+python3 -m src.evaluate.llm_claim_judge \
+  --backend gemini \
+  --model gemini-3.5-flash-lite \
+  --input results/batch_3_atomic_claims.gemini.jsonl \
+  --output results/batch_3_atomic_verdicts.gemini.jsonl \
+  --overwrite
 
-10-record evaluation smoke test (auto-detects canonical `text`/`summary` or legacy fields):
+# CASE 10 - AGGREGATE ATOMIC JUDGMENTS TO PARENT CLAIMS
+python3 -m src.evaluate.atomic_aggregate \
+  --input results/batch_3_atomic_verdicts.gemini.jsonl \
+  --output results/batch_3_parent_verdicts.gemini.jsonl
 
-  python -m src.evaluate.run_eval \
-    --data /data/vdt/summaries.jsonl \
-    --offline \
-    --nltk_data_dir models/nltk_data \
-    --batch_size 2 \
-    --limit 10 \
-    --output results/smoke.jsonl
+# CASE 11 - LOCAL ATOMIC CLAIMS WITH HYBRID RETRIEVAL
+python3 -m src.evaluate.atomic_claims \
+  --backend local \
+  --model models/Qwen2.5-3B-Instruct \
+  --input data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --output results/batch_3_atomic_claims.local_hybrid.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.local_hybrid.jsonl \
+  --device cuda \
+  --dtype bfloat16 \
+  --retrieval_mode hybrid \
+  --embedding_model_path models/your-local-encoder \
+  --embedding_device cuda \
+  --embedding_weight 0.5 \
+  --top_k 3
 
-After it succeeds, rerun without `--limit 10`; change output to
-`results/baseline.jsonl`.
+# CASE 12 - MANUAL REVIEW PACKET
+python3 -m src.evaluate.manual_review \
+  --data data/batch_3_cleaned.jsonl \
+  --audit results/batch_3_claim_audit.lexical.jsonl \
+  --jsonl results/batch_3_manual_review_20.jsonl \
+  --html results/batch_3_manual_review_20.html \
+  --documents 20 \
+  --flagged_fraction 0.5 \
+  --seed 42 \
+  --source_col input \
+  --summary_col output
 
-Optional FENICE/QAFactEval runs are not part of the approved shared
-environment. Use an IT-provisioned compatible environment for each one.
-FENICE uses its fixed Hugging Face model IDs from the local cache and extracts
-summary claims before NLI alignment:
+# CASE 13 - PREPARE SDS TRAIN/VALIDATION/TEST SPLITS
+python3 scripts/prepare_grpo_data.py \
+  --input /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
+  --source_col input \
+  --reference_col abstract_sum \
+  --output_dir results/sds_grpo_splits \
+  --validation_fraction 0.1 \
+  --test_fraction 0.1 \
+  --seed 42
 
-  python3 -m src.evaluate.run_eval \
-    --data data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --summary_col output \
-    --metrics fenice \
-    --hf_cache_dir models/hf-cache \
-    --offline \
-    --device cuda \
-    --batch_size 1 \
-    --output results/batch_3_fenice.jsonl
+# CASE 14 - GRPO LORA + FACTCC + REFERENCE REWARD
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_lora_factcc_reference_001 \
+  --faithfulness_metrics factcc \
+  --factcc_model_path models/factcc \
+  --reference_weight 0.25 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-lora-factcc-reference-001 \
+  --experiment_name sds-grpo-ablation \
+  --ablation lora-factcc-reference \
+  --finetuning_method lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --use_vllm \
+  --vllm_gpu_memory_utilization 0.25 \
+  --precision bf16 \
+  --seed 42
 
-QAFactEval uses the model tree produced by its upstream `download_models.sh`,
-not the Transformers cache:
+# CASE 15 - GRPO LORA + FACTCC WITHOUT REFERENCE REWARD
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_lora_factcc_no_reference_001 \
+  --faithfulness_metrics factcc \
+  --factcc_model_path models/factcc \
+  --reference_weight 0.0 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-lora-factcc-no-reference-001 \
+  --experiment_name sds-grpo-ablation \
+  --ablation lora-factcc-no-reference \
+  --finetuning_method lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --use_vllm \
+  --vllm_gpu_memory_utilization 0.25 \
+  --precision bf16 \
+  --seed 42
 
-  python3 -m src.evaluate.run_eval \
-    --data data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --summary_col output \
-    --metrics qafacteval \
-    --qafacteval_model_path models/qafacteval \
-    --device cuda \
-    --batch_size 1 \
-    --output results/batch_3_qafacteval.jsonl
+# CASE 16 - GRPO LORA + MINICHECK + REFERENCE REWARD
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_lora_minicheck_reference_001 \
+  --faithfulness_metrics minicheck \
+  --hf_cache_dir models/hf-cache \
+  --reference_weight 0.25 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-lora-minicheck-reference-001 \
+  --experiment_name sds-grpo-ablation \
+  --ablation lora-minicheck-reference \
+  --finetuning_method lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --use_vllm \
+  --vllm_gpu_memory_utilization 0.25 \
+  --precision bf16 \
+  --seed 42
 
-Create an HTML/JSON results report without extra packages:
+# CASE 17 - GRPO QLORA + FACTCC
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_qlora_factcc_reference_001 \
+  --faithfulness_metrics factcc \
+  --factcc_model_path models/factcc \
+  --reference_weight 0.25 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-qlora-factcc-reference-001 \
+  --experiment_name sds-grpo-ablation \
+  --ablation qlora-factcc-reference \
+  --finetuning_method qlora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --no-use_vllm \
+  --precision bf16 \
+  --seed 42
 
-  python scripts/make_report.py \
-    --input results/baseline.jsonl \
-    --output results/baseline_report.html
+# CASE 18 - GRPO FFT + FACTCC
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_fft_factcc_reference_001 \
+  --faithfulness_metrics factcc \
+  --factcc_model_path models/factcc \
+  --reference_weight 0.25 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-fft-factcc-reference-001 \
+  --experiment_name sds-grpo-ablation \
+  --ablation fft-factcc-reference \
+  --finetuning_method fft \
+  --no-use_vllm \
+  --precision bf16 \
+  --seed 42
 
-SDS evaluation now (legacy schema; this does not modify SDS):
+# CASE 19 - RESUME AN INTERRUPTED LORA RUN
+python3 -m src.training.train_grpo \
+  --model models/Llama-3.2-3B-Instruct \
+  --train_jsonl results/sds_grpo_splits/train.jsonl \
+  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
+  --output_dir outputs/sds_lora_factcc_reference_001 \
+  --faithfulness_metrics factcc \
+  --factcc_model_path models/factcc \
+  --resume_from_checkpoint outputs/sds_lora_factcc_reference_001/checkpoint-500 \
+  --reference_weight 0.25 \
+  --num_generations 4 \
+  --num_generations_eval 1 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_steps 5000 \
+  --max_completion_length 256 \
+  --eval_strategy steps \
+  --eval_steps 50 \
+  --save_steps 50 \
+  --logging_steps 10 \
+  --report_to tensorboard \
+  --run_name sds-lora-factcc-reference-001-resume \
+  --experiment_name sds-grpo-ablation \
+  --ablation lora-factcc-reference-resume \
+  --finetuning_method lora \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --use_vllm \
+  --vllm_gpu_memory_utilization 0.25 \
+  --precision bf16 \
+  --seed 42
 
-  CUDA_VISIBLE_DEVICES=0 python3 scripts/generate_summaries.py \
-    --model outputs/grpo_fft_base_maxsteps5000/final_model \
-    --input_jsonl /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
-    --output outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-    --summary_col grpo_sum \
-    --batch_size 1 \
-    --max_new_tokens 256 \
-    --max_input_tokens 4096
+# CASE 20 - RESULTS REPORT
+python3 scripts/make_report.py \
+  --input results/sds_grpo_fft_mfact_scored.jsonl \
+  --output results/sds_grpo_fft_mfact_report.html \
+  --run_dir outputs/sds_fft_factcc_reference_001
 
-  python3 -m src.evaluate.run_eval \
-    --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-    --source_col source \
-    --summary_col grpo_sum \
-    --reference_col human_sum \
-    --metrics factcc minicheck alignscore rouge \
-    --factcc_model_path models/factcc \
-    --hf_cache_dir models/hf-cache \
-    --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
-    --alignscore_backbone_path models/roberta-base \
-    --nltk_data_dir models/nltk_data \
-    --offline \
-    --batch_size 1 \
-    --output results/sds_grpo_fft_scored.jsonl
+# CASE 21 - OPTIONAL FENICE
+python3 -m src.evaluate.run_eval \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --metrics fenice \
+  --hf_cache_dir models/hf-cache \
+  --offline \
+  --device cuda \
+  --batch_size 1 \
+  --output results/batch_3_fenice.jsonl
 
-Vietnamese mFACT evaluation (optional; upload the complete model folder first):
-
-  python3 -m src.evaluate.run_eval \
-    --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-    --source_col source \
-    --summary_col grpo_sum \
-    --reference_col human_sum \
-    --metrics mfact rouge \
-    --mfact_model_path models/mfact-vi_VN \
-    --offline \
-    --batch_size 1 \
-    --output results/sds_grpo_fft_mfact_scored.jsonl
-
-Claim/evidence audit of the cleaned batch_3 reference (low-memory; start with 20 rows):
-
-  python3 -m src.evaluate.fact_audit \
-    --data data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --summary_col output \
-    --mfact_model_path models/mfact-vi_VN \
-    --device cpu \
-    --batch_size 1 \
-    --top_k 3 \
-    --limit 20 \
-    --offline \
-    --output results/batch_3_human_claim_audit.jsonl
-
-Manual review of 20 human-summary documents. First create the lightweight
-claim/evidence file; this does not require mFACT:
-
-  python3 -m src.evaluate.fact_audit \
-    --data data/batch_3_cleaned.jsonl \
-    --source_col input \
-    --summary_col output \
-    --no_mfact \
-    --split_clauses \
-    --top_k 3 \
-    --output results/batch_3_human_claim_audit_retrieval.jsonl
-
-Then create the offline browser form and editable JSONL template. This selects
-10 automatically flagged and 10 unflagged documents with seed 42:
-
-  python3 -m src.evaluate.manual_review \
-    --data data/batch_3_cleaned.jsonl \
-    --audit results/batch_3_human_claim_audit_retrieval.jsonl \
-    --jsonl results/batch_3_manual_review_20.jsonl \
-    --html results/batch_3_manual_review_20.html \
-    --documents 20 \
-    --flagged_fraction 0.5 \
-    --seed 42 \
-    --source_col input \
-    --summary_col output
-
-Open results/batch_3_manual_review_20.html in a browser, label each item as
-supported, contradicted, not_supported, unclear, or not_a_claim. Use
-not_a_claim for headings, labels, and fragments that do not assert a fact; add
-notes if needed, then click Download completed JSONL. Automatic flags are
-triage hints, not labels.
-
-Two-stage LLM claim audit. First locate exact factual spans. Candidate spans
-are taken from the original summary; the model only answers is_claim, and the
-accepted rows retain the original text plus character offsets:
-
-  python3 -m src.evaluate.claim_extractor --backend gemini --model gemini-3.5-flash-lite --input data/batch_3_cleaned.jsonl --source_col input --summary_col output --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --error_output results/batch_3_claim_extraction_errors.jsonl --limit 1 --sleep_seconds 0.2
-
-Remove --limit 1 for all documents. Then verify only the recovered claims:
-
-Claim extraction preserves full sentences by default. Do not enable clause
-splitting for heading-style text such as `Tuoi Than: gap nhieu rac roi trong
-cong viec`; `--split_clauses` is available only for a deliberate ablation.
-
-  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_claims.gemini.jsonl --output results/batch_3_claim_verdicts.gemini.jsonl --overwrite
-
-For a local model, replace the Gemini backend/model in both commands with a
-local instruction model. For Llama 3.2 3B, use
---backend local --model models/Llama-3.2-3B-Instruct --device cuda
---dtype bfloat16 --max_new_tokens 128. The local backend does not download by
-default. It accepts common Llama response variants and makes at most one
-repair attempt when the first response is malformed. Remove --limit 1 after
-the smoke test. Error rows preserve the raw model response, and accepted rows
-record claimness_raw_attempts and claimness_repair_attempted.
-
-Optional LLM second-rater pass over the manual-review packet. This does not overwrite human_label. The
-Gemini backend sends source text to Google, so use it only if company policy
-approves that transfer. Set GEMINI_API_KEY in the environment outside this
-file; never paste the key into a command or JSONL:
-
-  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --limit 1 --overwrite
-
-The one-row command is a smoke test. Remove --limit 1 for all claims. If a
-run stops, repeat with --resume instead of --overwrite:
-
-  python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --resume
-
-The verification judge requires label, reason, evidence_quote, and confidence
-in one structured response. Local malformed responses are retried once; every
-successful or failed row preserves the raw response attempts for diagnosis.
-
-Offline local-LLM second rater. The checkpoint must already be complete under
-models/; this command does not download anything by default:
-
-  python3 -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device auto --max_input_tokens 8192 --overwrite
-
-Recover actual factual claims after either human or LLM labeling. A claim is
-a minimal unit that asserts an event, state, relation, quantity, or other
-proposition with a truth value checkable against the source. Headings and
-topic labels remain available but are excluded from the claim file:
-
-  python3 -m src.evaluate.claim_recovery --input results/batch_3_manual_review_20.gemini.jsonl --label_col llm_label --output results/batch_3_claims.gemini.jsonl --non_claim_output results/batch_3_non_claims.gemini.jsonl --unresolved_output results/batch_3_unresolved.gemini.jsonl
-
-For manual labels, replace --label_col llm_label with --label_col human_label.
-not_supported is still an actual claim; only not_a_claim is excluded.
-
-After generation, audit a comparison file produced by `generate_summaries.py`.
-That script writes the source as `source`, the reference as `human_sum`, and
-the generated field using the requested `--summary_col`:
-
-  python3 -m src.evaluate.fact_audit \
-    --data outputs/batch_3_grpo_summaries.jsonl \
-    --source_col source \
-    --summary_cols human_sum grpo_sum \
-    --mfact_model_path models/mfact-vi_VN \
-    --device cpu \
-    --batch_size 1 \
-    --top_k 3 \
-    --limit 20 \
-    --offline \
-    --output results/batch_3_grpo_claim_audit.jsonl
-
-If the earlier baseline output has the same IDs plus `abstract_sum` and
-`llm_sum`, add `--existing_jsonl results/baseline.jsonl` to the generation
-command. Because that preserves the legacy reference column, evaluate both
-with `--summary_cols llm_sum grpo_sum --reference_col abstract_sum`.
-
-Prepare SDS for a later train/validation/test experiment. The legacy columns
-are explicitly named here: `id`, `input`, and `abstract_sum`. The original SDS
-file is read-only; all generated files stay under this repository:
-
-  python3 scripts/prepare_grpo_data.py \
-    --input /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
-    --source_col input \
-    --reference_col abstract_sum \
-    --output_dir results/sds_grpo_splits \
-    --validation_fraction 0.1 \
-    --test_fraction 0.1 \
-    --seed 42
-
-Review `results/sds_grpo_splits/data_manifest.json` before training. Use only
-`train.jsonl` for updates, `validation.jsonl` for model selection, and keep
-`test.jsonl` untouched until the final comparison.
-
-All experiments below use the same split, seed, one-epoch budget, explicit
-validation file, TensorBoard logging, and unique output directories. Run them
-separately; do not reuse an output directory. They require IT-provisioned
-TRL 1.9.2, PEFT, TensorBoard, and (for the first two) vLLM.
-
-Experiment A: LoRA + FactCC + reference reward (recommended first treatment):
-
-  python3 -m src.training.train_grpo \
-    --model models/Llama-3.2-3B-Instruct \
-    --train_jsonl results/sds_grpo_splits/train.jsonl \
-    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-    --output_dir outputs/sds_lora_factcc_001 \
-    --faithfulness_metrics factcc \
-    --factcc_model_path models/factcc \
-    --reward_device cpu \
-    --reward_batch_size 4 \
-    --reference_weight 0.25 \
-    --metric_weights 1.0 \
-    --num_generations 4 \
-    --num_generations_eval 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
-    --num_train_epochs 1 \
-    --max_completion_length 256 \
-    --eval_strategy epoch \
-    --save_strategy steps \
-    --save_steps 50 \
-    --max_checkpoints 2 \
-    --logging_steps 1 \
-    --report_to tensorboard \
-    --run_name sds-lora-factcc-001 \
-    --experiment_name sds-grpo-comparison \
-    --ablation lora-factcc-plus-reference \
-    --tag sds --tag lora --tag factcc \
-    --notes "Legacy SDS; explicit validation split; one epoch." \
-    --finetuning_method lora \
-    --lora_r 16 \
-    --lora_alpha 32 \
-    --use_vllm \
-    --vllm_mode colocate \
-    --vllm_gpu_memory_utilization 0.25 \
-    --precision bf16 \
-    --seed 42
-
-Experiment B: LoRA + MiniCheck + reference reward:
-
-  python3 -m src.training.train_grpo \
-    --model models/Llama-3.2-3B-Instruct \
-    --train_jsonl results/sds_grpo_splits/train.jsonl \
-    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-    --output_dir outputs/sds_lora_minicheck_001 \
-    --faithfulness_metrics minicheck \
-    --hf_cache_dir models/hf-cache \
-    --reward_device cpu \
-    --reward_batch_size 4 \
-    --reference_weight 0.25 \
-    --metric_weights 1.0 \
-    --num_generations 4 \
-    --num_generations_eval 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
-    --num_train_epochs 1 \
-    --max_completion_length 256 \
-    --eval_strategy epoch \
-    --save_strategy steps \
-    --save_steps 50 \
-    --max_checkpoints 2 \
-    --logging_steps 1 \
-    --report_to tensorboard \
-    --run_name sds-lora-minicheck-001 \
-    --experiment_name sds-grpo-comparison \
-    --ablation lora-minicheck-plus-reference \
-    --tag sds --tag lora --tag minicheck \
-    --notes "Legacy SDS; same split and budget as FactCC treatment." \
-    --finetuning_method lora \
-    --lora_r 16 \
-    --lora_alpha 32 \
-    --use_vllm \
-    --vllm_mode colocate \
-    --vllm_gpu_memory_utilization 0.25 \
-    --precision bf16 \
-    --seed 42
-
-Experiment C: reference-reward ablation (FactCC only):
-
-  python3 -m src.training.train_grpo \
-    --model models/Llama-3.2-3B-Instruct \
-    --train_jsonl results/sds_grpo_splits/train.jsonl \
-    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-    --output_dir outputs/sds_lora_factcc_no_reference_001 \
-    --faithfulness_metrics factcc \
-    --factcc_model_path models/factcc \
-    --reward_device cpu \
-    --reward_batch_size 4 \
-    --reference_weight 0.0 \
-    --metric_weights 1.0 \
-    --num_generations 4 \
-    --num_generations_eval 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
-    --num_train_epochs 1 \
-    --max_completion_length 256 \
-    --eval_strategy epoch \
-    --save_strategy steps \
-    --save_steps 50 \
-    --max_checkpoints 2 \
-    --logging_steps 1 \
-    --report_to tensorboard \
-    --run_name sds-lora-factcc-no-reference-001 \
-    --experiment_name sds-grpo-comparison \
-    --ablation lora-factcc-no-reference \
-    --tag sds --tag lora --tag factcc --tag no-reference \
-    --notes "Ablation: disables human-reference overlap reward." \
-    --finetuning_method lora \
-    --lora_r 16 \
-    --lora_alpha 32 \
-    --use_vllm \
-    --vllm_mode colocate \
-    --vllm_gpu_memory_utilization 0.25 \
-    --precision bf16 \
-    --seed 42
-
-Optional Experiment D: FFT + FactCC. This is much more expensive and should
-not share a directory with the existing FFT run:
-
-  python3 -m src.training.train_grpo \
-    --model models/Llama-3.2-3B-Instruct \
-    --train_jsonl results/sds_grpo_splits/train.jsonl \
-    --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-    --output_dir outputs/sds_fft_factcc_001 \
-    --faithfulness_metrics factcc \
-    --factcc_model_path models/factcc \
-    --reward_device cpu \
-    --reward_batch_size 4 \
-    --reference_weight 0.25 \
-    --metric_weights 1.0 \
-    --num_generations 4 \
-    --num_generations_eval 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
-    --num_train_epochs 1 \
-    --max_completion_length 256 \
-    --eval_strategy epoch \
-    --save_strategy steps \
-    --save_steps 50 \
-    --max_checkpoints 2 \
-    --logging_steps 1 \
-    --report_to tensorboard \
-    --run_name sds-fft-factcc-001 \
-    --experiment_name sds-grpo-comparison \
-    --ablation fft-factcc-plus-reference \
-    --tag sds --tag fft --tag factcc \
-    --notes "Full fine-tuning ablation; no colocated vLLM to reduce memory pressure." \
-    --finetuning_method fft \
-    --no-use_vllm \
-    --precision bf16 \
-    --seed 42
-
-After each run, generate validation summaries from the same validation rows,
-then score them with the same metrics and decoding settings. For LoRA use
-`final_adapter` plus `--base_model`; for FFT use `final_model` alone. Keep
-each generated column and scored file under a unique name. Create a report
-with `scripts/make_report.py --run_dir outputs/<run-name>` so the report
-includes the run manifest and training history. Keep `test.jsonl` untouched
-until the final frozen comparison. See `GRPO_EXPERIMENT.md` for the research
-limitations and reporting checklist.
+# CASE 22 - OPTIONAL QAFACTEVAL
+python3 -m src.evaluate.run_eval \
+  --data data/batch_3_cleaned.jsonl \
+  --source_col input \
+  --summary_col output \
+  --metrics qafacteval \
+  --qafacteval_model_path models/qafacteval \
+  --device cuda \
+  --batch_size 1 \
+  --output results/batch_3_qafacteval.jsonl
