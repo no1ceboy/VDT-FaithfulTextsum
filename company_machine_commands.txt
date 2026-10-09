@@ -212,6 +212,10 @@ run stops, repeat with --resume instead of --overwrite:
 
   python3 -m src.evaluate.llm_claim_judge --backend gemini --model gemini-3.5-flash-lite --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.gemini.jsonl --resume
 
+The verification judge requires label, reason, evidence_quote, and confidence
+in one structured response. Local malformed responses are retried once; every
+successful or failed row preserves the raw response attempts for diagnosis.
+
 Offline local-LLM second rater. The checkpoint must already be complete under
 models/; this command does not download anything by default:
 

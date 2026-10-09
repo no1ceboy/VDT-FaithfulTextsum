@@ -235,6 +235,11 @@ uses the same five labels and writes `llm_label`, `llm_reason`,
 not require installing the Google SDK. The configured model is
 `gemini-3.5-flash-lite`.
 
+The verification parser is strict for both backends: it requires all four
+judgment fields and rejects reasoning/prose around the object. A local model
+gets one bounded format-repair attempt; failed rows retain
+`llm_raw_attempts`, `llm_repair_attempted`, and `judge_error` in the output.
+
 The Gemini backend sends the source document and claim to Google's API. Use it
 only when that data transfer is approved for the dataset. Keep the key in an
 environment variable, never in a command file or JSONL:

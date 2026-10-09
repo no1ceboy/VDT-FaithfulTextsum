@@ -11,6 +11,7 @@ loads an already available Transformers checkpoint and is offline by default.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import math
@@ -171,24 +172,56 @@ SOURCE DOCUMENT (the only authority):
 """
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
-    cleaned = str(text).strip()
+def _judge_repair_prompt(row: dict[str, Any], previous_response: str) -> str:
+    """Ask a local model once to repair a malformed factuality judgment."""
+    return f"""The previous judgment did not follow the required output format.
+Re-evaluate the same claim against the same source and return exactly one JSON
+object with these keys:
+label, reason, evidence_quote, confidence.
+The label must be one of supported, contradicted, not_supported, unclear, or
+not_a_claim. Confidence must be a JSON number from 0 to 1. Do not return
+Markdown, prose, a Python dictionary, or any <think>/<analysis> reasoning
+block. Any text outside the JSON object is invalid.
+
+{build_judge_prompt(row)}
+
+PREVIOUS INVALID RESPONSE:
+<previous_response>
+{previous_response}
+</previous_response>"""
+
+
+def _parse_structured_object(text: str) -> dict[str, Any]:
+    """Parse one complete JSON-like object without salvaging embedded text."""
+    raw_text = str(text).strip()
+    if not raw_text:
+        raise JudgeError("model returned an empty judgment response")
+    if re.search(
+        r"<\s*/?\s*(?:think|analysis|reasoning|thought)\s*>"
+        r"|<\|(?:begin|end)_(?:of_)?(?:think|thinking|analysis|reasoning|thought)\|>",
+        raw_text,
+        flags=re.IGNORECASE,
+    ):
+        raise JudgeError("model emitted a thinking/reasoning block; response is invalid")
+
+    cleaned = raw_text
     if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL
+        )
+        if fenced is None:
+            raise JudgeError("model returned an invalid Markdown wrapper around judgment JSON")
+        cleaned = fenced.group(1).strip()
+
     try:
         value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        value = None
-        for match in re.finditer(r"\{", cleaned):
-            try:
-                value, _ = decoder.raw_decode(cleaned[match.start() :])
-                break
-            except json.JSONDecodeError:
-                continue
-        if value is None:
-            raise JudgeError(f"model did not return a JSON object: {cleaned[:500]!r}")
+    except json.JSONDecodeError as json_error:
+        try:
+            value = ast.literal_eval(cleaned)
+        except (SyntaxError, ValueError, TypeError) as literal_error:
+            raise JudgeError(
+                "model did not return exactly one JSON object without reasoning or prose"
+            ) from literal_error
     if not isinstance(value, dict):
         raise JudgeError("model JSON response was not an object")
     return value
@@ -196,22 +229,28 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 def parse_judgment(text: str) -> dict[str, Any]:
     """Parse and validate a model's structured judgment."""
-    value = _extract_json_object(text)
+    value = _parse_structured_object(text)
+    required = ("label", "reason", "evidence_quote", "confidence")
+    missing = [key for key in required if key not in value]
+    if missing:
+        raise JudgeError(
+            "model JSON response is missing required judgment keys: " + ", ".join(missing)
+        )
     raw_label = str(value.get("label", "")).strip().casefold().replace("-", "_")
     label = _LABEL_ALIASES.get(raw_label)
     if label is None:
         raise JudgeError(f"model returned invalid label {raw_label!r}; expected one of {LABELS}")
     reason = str(value.get("reason", "")).strip()
+    if not reason:
+        raise JudgeError("model returned an empty judgment reason")
     quote = str(value.get("evidence_quote", "")).strip()
     confidence_value = value.get("confidence")
     try:
         confidence = float(confidence_value)
     except (TypeError, ValueError):
-        confidence = None
-    if confidence is not None and not math.isfinite(confidence):
-        confidence = None
-    if confidence is not None:
-        confidence = max(0.0, min(1.0, confidence))
+        raise JudgeError("model returned a non-numeric judgment confidence")
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        raise JudgeError("model judgment confidence must be between 0 and 1")
     return {
         "label": label,
         "reason": reason,
@@ -241,6 +280,8 @@ class GeminiClaimJudge:
         self.timeout = timeout
         self.retries = max(0, retries)
         self.retry_seconds = max(0.0, retry_seconds)
+        self.last_raw_response = ""
+        self.last_raw_attempts: list[str] = []
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         model_path = urlparse.quote(self.model_name, safe="")
@@ -317,8 +358,11 @@ class GeminiClaimJudge:
             build_judge_prompt(row),
             JUDGMENT_SCHEMA,
         )
+        self.last_raw_response = text
+        self.last_raw_attempts = [text]
         judgment = parse_judgment(text)
         judgment["raw_response"] = text
+        judgment["raw_attempts"] = [text]
         return judgment
 
 
@@ -348,6 +392,8 @@ class LocalClaimJudge:
         self.model_name = str(model_path)
         self.max_input_tokens = max_input_tokens
         self.max_new_tokens = max_new_tokens
+        self.last_raw_response = ""
+        self.last_raw_attempts: list[str] = []
         path = Path(model_path)
         if not path.is_dir():
             raise FileNotFoundError(f"Local judge model folder not found: {path}")
@@ -441,9 +487,25 @@ class LocalClaimJudge:
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
     def judge(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.last_raw_response = ""
+        self.last_raw_attempts = []
         text = self.generate_text(JUDGE_SYSTEM_PROMPT, build_judge_prompt(row))
-        judgment = parse_judgment(text)
-        judgment["raw_response"] = text
+        attempts = [text]
+        self.last_raw_response = text
+        self.last_raw_attempts = attempts.copy()
+        try:
+            judgment = parse_judgment(text)
+        except JudgeError:
+            repaired = self.generate_text(
+                JUDGE_SYSTEM_PROMPT,
+                _judge_repair_prompt(row, text),
+            )
+            attempts.append(repaired)
+            self.last_raw_attempts = attempts.copy()
+            self.last_raw_response = "\n--- repair attempt ---\n".join(attempts)
+            judgment = parse_judgment(repaired)
+        judgment["raw_response"] = attempts[-1]
+        judgment["raw_attempts"] = attempts
         return judgment
 
 
@@ -471,6 +533,8 @@ def _annotated_row(
             "llm_evidence_quote": judgment.get("evidence_quote", "") if judgment else "",
             "llm_confidence": judgment.get("confidence") if judgment else None,
             "llm_raw": judgment.get("raw_response", "") if judgment else "",
+            "llm_raw_attempts": judgment.get("raw_attempts", []) if judgment else [],
+            "llm_repair_attempted": len(judgment.get("raw_attempts", [])) > 1 if judgment else False,
         }
     )
     return output
@@ -554,6 +618,10 @@ def run_judgment(
                     row,
                     backend=getattr(judge, "backend_name", judge.__class__.__name__),
                     model_name=judge.model_name,
+                    judgment={
+                        "raw_response": getattr(judge, "last_raw_response", ""),
+                        "raw_attempts": list(getattr(judge, "last_raw_attempts", [])),
+                    },
                     error_message=message,
                 )
             _write_jsonl_row(stream, annotated)
