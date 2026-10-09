@@ -1,175 +1,66 @@
-# VDT-FaithfulTextsum: company-machine commands
+# VDT-FaithfulTextsum: canonical company-machine commands
 
-# CASE 01 - CLEAN LEGACY BATCH_3 (input/output; original is unchanged)
+# CASE 01 - CLEAN THE CANONICAL id/text/summary DATASET (original unchanged)
 python3 -m src.data.clean_dataset \
-  --input data/batch_3.jsonl \
-  --output data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --reference_col output \
+  --input data/training.jsonl \
+  --output data/training_cleaned.jsonl \
+  --source_col text \
+  --reference_col summary \
   --replacement_policy drop \
   --drop_stale_token_lengths \
-  --report results/batch_3_cleaning.json \
-  --audit_log results/batch_3_cleaning.audit.jsonl
+  --report results/training_cleaning.json \
+  --audit_log results/training_cleaning.audit.jsonl
 
-# CASE 02 - BASELINE EVALUATION (10-row smoke test; remove --limit for full run)
-python3 -m src.evaluate.run_eval \
-  --data data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --metrics factcc minicheck alignscore rouge \
-  --factcc_model_path models/factcc \
-  --hf_cache_dir models/hf-cache \
-  --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
-  --alignscore_backbone_path models/roberta-base \
-  --nltk_data_dir models/nltk_data \
-  --offline \
-  --device cuda \
-  --batch_size 1 \
-  --limit 10 \
-  --output results/batch_3_baseline_smoke.jsonl
-
-# CASE 03 - GENERATE SDS GRPO SUMMARIES (legacy SDS schema)
-CUDA_VISIBLE_DEVICES=0 python3 scripts/generate_summaries.py \
-  --model outputs/grpo_fft_base_maxsteps5000/final_model \
-  --input_jsonl /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
-  --output outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-  --summary_col grpo_sum \
-  --batch_size 1 \
-  --max_new_tokens 256 \
-  --max_input_tokens 4096
-
-# CASE 04 - EVALUATE SDS GRPO OUTPUT
-python3 -m src.evaluate.run_eval \
-  --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-  --source_col source \
-  --summary_col grpo_sum \
-  --reference_col human_sum \
-  --metrics factcc minicheck alignscore rouge \
-  --factcc_model_path models/factcc \
-  --hf_cache_dir models/hf-cache \
-  --alignscore_ckpt models/alignscore/AlignScore-base.ckpt \
-  --alignscore_backbone_path models/roberta-base \
-  --nltk_data_dir models/nltk_data \
-  --offline \
-  --device cuda \
-  --batch_size 1 \
-  --output results/sds_grpo_fft_scored.jsonl
-
-# CASE 05 - VIETNAMESE mFACT EVALUATION
-python3 -m src.evaluate.run_eval \
-  --data outputs/grpo_fft_base_maxsteps5000/grpo_summaries.jsonl \
-  --source_col source \
-  --summary_col grpo_sum \
-  --reference_col human_sum \
-  --metrics mfact rouge \
-  --mfact_model_path models/mfact-vi_VN \
-  --offline \
-  --device cpu \
-  --batch_size 1 \
-  --output results/sds_grpo_fft_mfact_scored.jsonl
-
-# CASE 06 - RETRIEVAL-ONLY EVIDENCE BASELINE (20-row smoke test)
-python3 -m src.evaluate.fact_audit \
-  --data data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --no_mfact \
-  --top_k 3 \
-  --limit 20 \
-  --output results/batch_3_claim_audit.lexical.jsonl
-
-# CASE 07 - RETRIEVAL-ONLY EVIDENCE WITH HYBRID EMBEDDINGS
-python3 -m src.evaluate.fact_audit \
-  --data data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --no_mfact \
-  --top_k 3 \
-  --limit 20 \
-  --retrieval_mode hybrid \
-  --embedding_model_path models/your-local-encoder \
-  --embedding_device cuda \
-  --embedding_weight 0.5 \
-  --output results/batch_3_claim_audit.hybrid.jsonl
-
-# CASE 08 - DIRECT ATOMIC CLAIMS (local GPU; legacy input/output)
+# CASE 02 - DIRECT ATOMIC CLAIM EXTRACTION (local GPU smoke test)
+# Remove --limit 1 for the full dataset. For id/text/summary data, use
+# --source_col text --summary_col summary and change only the input path.
 python3 -m src.evaluate.atomic_claims \
   --backend local \
   --model models/Llama-3.2-3B-Instruct \
-  --input data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --output results/batch_3_atomic_claims.local.jsonl \
-  --coverage_output results/batch_3_atomic_coverage.local.jsonl \
-  --error_output results/batch_3_atomic_claim_errors.local.jsonl \
+  --input data/training_cleaned.jsonl \
+  --source_col text \
+  --summary_col summary \
+  --output results/atomic_claims.local.jsonl \
+  --coverage_output results/atomic_coverage.local.jsonl \
+  --error_output results/atomic_errors.local.jsonl \
   --device cuda \
   --dtype bfloat16 \
   --model_batch_size 8 \
   --top_k 3 \
   --limit 1
 
-# CASE 09 - JUDGE ATOMIC CLAIMS (local GPU)
+# CASE 03 - JUDGE THE ATOMIC CLAIMS (local GPU)
 python3 -m src.evaluate.llm_claim_judge \
   --backend local \
   --model models/Llama-3.2-3B-Instruct \
-  --input results/batch_3_atomic_claims.local.jsonl \
-  --output results/batch_3_atomic_verdicts.local.jsonl \
+  --input results/atomic_claims.local.jsonl \
+  --output results/atomic_verdicts.local.jsonl \
   --device cuda \
   --dtype bfloat16 \
   --model_batch_size 8 \
   --overwrite
 
-# CASE 10 - AGGREGATE ATOMIC JUDGMENTS TO PARENT CLAIMS
+# CASE 04 - AGGREGATE ATOMIC JUDGMENTS TO PARENT SUMMARIES
 python3 -m src.evaluate.atomic_aggregate \
-  --input results/batch_3_atomic_verdicts.local.jsonl \
-  --output results/batch_3_parent_verdicts.local.jsonl
+  --input results/atomic_verdicts.local.jsonl \
+  --output results/parent_verdicts.local.jsonl
 
-# CASE 11 - LOCAL ATOMIC CLAIMS WITH HYBRID RETRIEVAL
-python3 -m src.evaluate.atomic_claims \
-  --backend local \
-  --model models/Qwen2.5-3B-Instruct \
-  --input data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --output results/batch_3_atomic_claims.local_hybrid.jsonl \
-  --coverage_output results/batch_3_atomic_coverage.local_hybrid.jsonl \
-  --device cuda \
-  --dtype bfloat16 \
-  --model_batch_size 8 \
-  --retrieval_mode hybrid \
-  --embedding_model_path models/your-local-encoder \
-  --embedding_device cuda \
-  --embedding_weight 0.5 \
-  --top_k 3
-
-# CASE 12 - MANUAL REVIEW PACKET
-python3 -m src.evaluate.manual_review \
-  --data data/batch_3_cleaned.jsonl \
-  --audit results/batch_3_claim_audit.lexical.jsonl \
-  --jsonl results/batch_3_manual_review_20.jsonl \
-  --html results/batch_3_manual_review_20.html \
-  --documents 20 \
-  --flagged_fraction 0.5 \
-  --seed 42 \
-  --source_col input \
-  --summary_col output
-
-# CASE 13 - PREPARE SDS TRAIN/VALIDATION/TEST SPLITS
+# CASE 05 - PREPARE TRAINING SPLITS (canonical id/text/summary format)
 python3 scripts/prepare_grpo_data.py \
-  --input /workspace/storage-shared/nlp/text-sum-hub/hapv14/PASSED_LABELED_DATA/batch1/sds.jsonl \
-  --source_col input \
-  --reference_col abstract_sum \
-  --output_dir results/sds_grpo_splits \
+  --input data/training_cleaned.jsonl \
+  --source_col text \
+  --reference_col summary \
+  --output_dir results/training_splits \
   --validation_fraction 0.1 \
   --test_fraction 0.1 \
   --seed 42
 
-# CASE 14 - GRPO LORA + FACTCC + REFERENCE REWARD
+# CASE 06 - EXPERIMENT A: LORA + FACTCC + REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_lora_factcc_reference_001 \
+  --train_jsonl results/training_splits/train.jsonl \
+  --eval_jsonl results/training_splits/validation.jsonl \
+  --output_dir outputs/grpo_lora_factcc_reference_001 \
   --faithfulness_metrics factcc \
   --factcc_model_path models/factcc \
   --reference_weight 0.25 \
@@ -185,8 +76,8 @@ python3 -m src.training.train_grpo \
   --save_steps 50 \
   --logging_steps 10 \
   --report_to tensorboard \
-  --run_name sds-lora-factcc-reference-001 \
-  --experiment_name sds-grpo-ablation \
+  --run_name grpo-lora-factcc-reference-001 \
+  --experiment_name grpo-faithfulness-ablation \
   --ablation lora-factcc-reference \
   --finetuning_method lora \
   --lora_r 16 \
@@ -196,12 +87,12 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 15 - GRPO LORA + FACTCC WITHOUT REFERENCE REWARD
+# CASE 07 - EXPERIMENT B: LORA + FACTCC WITHOUT REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_lora_factcc_no_reference_001 \
+  --train_jsonl results/training_splits/train.jsonl \
+  --eval_jsonl results/training_splits/validation.jsonl \
+  --output_dir outputs/grpo_lora_factcc_no_reference_001 \
   --faithfulness_metrics factcc \
   --factcc_model_path models/factcc \
   --reference_weight 0.0 \
@@ -217,8 +108,8 @@ python3 -m src.training.train_grpo \
   --save_steps 50 \
   --logging_steps 10 \
   --report_to tensorboard \
-  --run_name sds-lora-factcc-no-reference-001 \
-  --experiment_name sds-grpo-ablation \
+  --run_name grpo-lora-factcc-no-reference-001 \
+  --experiment_name grpo-faithfulness-ablation \
   --ablation lora-factcc-no-reference \
   --finetuning_method lora \
   --lora_r 16 \
@@ -228,12 +119,12 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 16 - GRPO LORA + MINICHECK + REFERENCE REWARD
+# CASE 08 - EXPERIMENT C: LORA + MINICHECK + REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_lora_minicheck_reference_001 \
+  --train_jsonl results/training_splits/train.jsonl \
+  --eval_jsonl results/training_splits/validation.jsonl \
+  --output_dir outputs/grpo_lora_minicheck_reference_001 \
   --faithfulness_metrics minicheck \
   --hf_cache_dir models/hf-cache \
   --reference_weight 0.25 \
@@ -249,8 +140,8 @@ python3 -m src.training.train_grpo \
   --save_steps 50 \
   --logging_steps 10 \
   --report_to tensorboard \
-  --run_name sds-lora-minicheck-reference-001 \
-  --experiment_name sds-grpo-ablation \
+  --run_name grpo-lora-minicheck-reference-001 \
+  --experiment_name grpo-faithfulness-ablation \
   --ablation lora-minicheck-reference \
   --finetuning_method lora \
   --lora_r 16 \
@@ -260,12 +151,12 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 17 - GRPO QLORA + FACTCC
+# CASE 09 - EXPERIMENT D: QLORA + FACTCC
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_qlora_factcc_reference_001 \
+  --train_jsonl results/training_splits/train.jsonl \
+  --eval_jsonl results/training_splits/validation.jsonl \
+  --output_dir outputs/grpo_qlora_factcc_reference_001 \
   --faithfulness_metrics factcc \
   --factcc_model_path models/factcc \
   --reference_weight 0.25 \
@@ -281,8 +172,8 @@ python3 -m src.training.train_grpo \
   --save_steps 50 \
   --logging_steps 10 \
   --report_to tensorboard \
-  --run_name sds-qlora-factcc-reference-001 \
-  --experiment_name sds-grpo-ablation \
+  --run_name grpo-qlora-factcc-reference-001 \
+  --experiment_name grpo-faithfulness-ablation \
   --ablation qlora-factcc-reference \
   --finetuning_method qlora \
   --lora_r 16 \
@@ -291,12 +182,12 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 18 - GRPO FFT + FACTCC
+# CASE 10 - EXPERIMENT E: FULL FINE-TUNING + FACTCC
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_fft_factcc_reference_001 \
+  --train_jsonl results/training_splits/train.jsonl \
+  --eval_jsonl results/training_splits/validation.jsonl \
+  --output_dir outputs/grpo_fft_factcc_reference_001 \
   --faithfulness_metrics factcc \
   --factcc_model_path models/factcc \
   --reference_weight 0.25 \
@@ -312,72 +203,10 @@ python3 -m src.training.train_grpo \
   --save_steps 50 \
   --logging_steps 10 \
   --report_to tensorboard \
-  --run_name sds-fft-factcc-reference-001 \
-  --experiment_name sds-grpo-ablation \
+  --run_name grpo-fft-factcc-reference-001 \
+  --experiment_name grpo-faithfulness-ablation \
   --ablation fft-factcc-reference \
   --finetuning_method fft \
   --no-use_vllm \
   --precision bf16 \
   --seed 42
-
-# CASE 19 - RESUME AN INTERRUPTED LORA RUN
-python3 -m src.training.train_grpo \
-  --model models/Llama-3.2-3B-Instruct \
-  --train_jsonl results/sds_grpo_splits/train.jsonl \
-  --eval_jsonl results/sds_grpo_splits/validation.jsonl \
-  --output_dir outputs/sds_lora_factcc_reference_001 \
-  --faithfulness_metrics factcc \
-  --factcc_model_path models/factcc \
-  --resume_from_checkpoint outputs/sds_lora_factcc_reference_001/checkpoint-500 \
-  --reference_weight 0.25 \
-  --num_generations 4 \
-  --num_generations_eval 1 \
-  --per_device_train_batch_size 1 \
-  --per_device_eval_batch_size 1 \
-  --gradient_accumulation_steps 4 \
-  --max_steps 5000 \
-  --max_completion_length 256 \
-  --eval_strategy steps \
-  --eval_steps 50 \
-  --save_steps 50 \
-  --logging_steps 10 \
-  --report_to tensorboard \
-  --run_name sds-lora-factcc-reference-001-resume \
-  --experiment_name sds-grpo-ablation \
-  --ablation lora-factcc-reference-resume \
-  --finetuning_method lora \
-  --lora_r 16 \
-  --lora_alpha 32 \
-  --use_vllm \
-  --vllm_gpu_memory_utilization 0.25 \
-  --precision bf16 \
-  --seed 42
-
-# CASE 20 - RESULTS REPORT
-python3 scripts/make_report.py \
-  --input results/sds_grpo_fft_mfact_scored.jsonl \
-  --output results/sds_grpo_fft_mfact_report.html \
-  --run_dir outputs/sds_fft_factcc_reference_001
-
-# CASE 21 - OPTIONAL FENICE
-python3 -m src.evaluate.run_eval \
-  --data data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --metrics fenice \
-  --hf_cache_dir models/hf-cache \
-  --offline \
-  --device cuda \
-  --batch_size 1 \
-  --output results/batch_3_fenice.jsonl
-
-# CASE 22 - OPTIONAL QAFACTEVAL
-python3 -m src.evaluate.run_eval \
-  --data data/batch_3_cleaned.jsonl \
-  --source_col input \
-  --summary_col output \
-  --metrics qafacteval \
-  --qafacteval_model_path models/qafacteval \
-  --device cuda \
-  --batch_size 1 \
-  --output results/batch_3_qafacteval.jsonl
