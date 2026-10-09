@@ -170,7 +170,7 @@ def parse_atomic_decomposition(text: str, parent_claim: str) -> list[dict[str, A
 
 
 class AtomicClaimDecomposer:
-    """Run atomic decomposition with one bounded local format repair."""
+    """Run atomic decomposition with bounded local format repair."""
 
     def __init__(self, generator: AtomicGenerator) -> None:
         self.generator = generator
@@ -207,6 +207,76 @@ class AtomicClaimDecomposer:
             "raw_response": attempts[-1],
             "raw_attempts": attempts,
         }
+
+    def decompose_many(self, parent_claims: list[str]) -> list[dict[str, Any]]:
+        """Decompose several parent units with a local batch generator.
+
+        A malformed response is repaired independently with a single-item
+        call. Errors are returned in their aligned result slot so one bad
+        summary unit does not discard the rest of the batch.
+        """
+        if not parent_claims:
+            return []
+        batch_generator = getattr(self.generator, "generate_text_batch", None)
+        if not callable(batch_generator):
+            return [self.decompose(parent_claim) for parent_claim in parent_claims]
+        raw_responses = list(
+            batch_generator(
+                ATOMIC_SYSTEM_PROMPT,
+                [_atomic_prompt(parent_claim) for parent_claim in parent_claims],
+            )
+        )
+        if len(raw_responses) != len(parent_claims):
+            raise JudgeError(
+                f"local batch returned {len(raw_responses)} responses for "
+                f"{len(parent_claims)} summary units"
+            )
+        results: list[dict[str, Any]] = []
+        for parent_claim, raw in zip(parent_claims, raw_responses):
+            attempts = [raw]
+            self.last_raw_response = raw
+            self.last_raw_attempts = attempts.copy()
+            try:
+                atomic_claims = parse_atomic_decomposition(raw, parent_claim)
+            except JudgeError as first_error:
+                if self.backend_name != "local":
+                    results.append(
+                        {
+                            "_error": f"{type(first_error).__name__}: {first_error}",
+                            "atomic_claims": [],
+                            "raw_response": raw,
+                            "raw_attempts": attempts,
+                        }
+                    )
+                    continue
+                try:
+                    repaired = self.generator.generate_text(
+                        ATOMIC_SYSTEM_PROMPT,
+                        _atomic_repair_prompt(parent_claim, raw),
+                    )
+                    attempts.append(repaired)
+                    self.last_raw_response = "\n--- repair attempt ---\n".join(attempts)
+                    self.last_raw_attempts = attempts.copy()
+                    atomic_claims = parse_atomic_decomposition(repaired, parent_claim)
+                except Exception as repair_error:
+                    results.append(
+                        {
+                            "_error": f"{type(repair_error).__name__}: {repair_error}",
+                            "atomic_claims": [],
+                            "raw_response": attempts[-1],
+                            "raw_attempts": attempts,
+                            "first_error": str(first_error),
+                        }
+                    )
+                    continue
+            results.append(
+                {
+                    "atomic_claims": atomic_claims,
+                    "raw_response": attempts[-1],
+                    "raw_attempts": attempts,
+                }
+            )
+        return results
 
 
 def _source_value(row: dict[str, Any]) -> str:
@@ -290,6 +360,7 @@ def _decompose_parent_row(
     retrieval_mode: str,
     embedding_retriever: EmbeddingEvidenceRetriever | None,
     embedding_weight: float,
+    decomposition_result: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
     """Decompose one parent unit and return atoms, coverage, and an error."""
     source = _source_value(row)
@@ -307,8 +378,12 @@ def _decompose_parent_row(
         )
         return [], coverage, dict(coverage)
 
+    result = decomposition_result
     try:
-        result = decomposer.decompose(parent_claim)
+        if result is None:
+            result = decomposer.decompose(parent_claim)
+        if result.get("_error"):
+            raise JudgeError(str(result["_error"]))
         parent_start = _parent_start(row)
         atomic_claims = result["atomic_claims"]
         output_rows: list[dict[str, Any]] = []
@@ -366,6 +441,7 @@ def _decompose_parent_row(
             source,
             parent_claim,
             decomposer,
+            result=result,
             status="error",
             error=message,
         )
@@ -477,6 +553,7 @@ def decompose_original_records(
     embedding_weight: float = 0.5,
     limit: int | None = None,
     sleep_seconds: float = 0.0,
+    model_batch_size: int = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Extract atoms directly from original records.
 
@@ -485,10 +562,10 @@ def decompose_original_records(
     claims are emitted to ``atomic_rows`` so the result is immediately
     compatible with ``llm_claim_judge``.
     """
+    if model_batch_size < 1:
+        raise ValueError("model_batch_size must be positive")
     selected = rows if limit is None else rows[:limit]
-    atomic_rows: list[dict[str, Any]] = []
-    coverage_rows: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
+    parent_rows: list[dict[str, Any]] = []
     for document_index, row in enumerate(selected, 1):
         source = str(row.get(source_col, "") or "").strip()
         summary = str(row.get(summary_col, "") or "")
@@ -507,55 +584,71 @@ def decompose_original_records(
                     "summary_unit_index": None,
                 }
             )
-            _atoms, coverage, error = _decompose_parent_row(
-                parent_row,
-                decomposer,
-                top_k=top_k,
-                retrieval_mode=retrieval_mode,
-                embedding_retriever=embedding_retriever,
-                embedding_weight=embedding_weight,
+            parent_rows.append(parent_row)
+            continue
+        spans = summary_spans(summary)
+        for span in spans:
+            parent_row = dict(row)
+            parent_row.update(
+                {
+                    "source": source,
+                    "source_col": source_col,
+                    "summary_col": summary_col,
+                    "summary_text": summary,
+                    "parent_claim": span["text"],
+                    "claim": span["text"],
+                    "claim_text": span["text"],
+                    "claim_index": span["candidate_index"],
+                    "claim_count": len(spans),
+                    "record_index": document_index - 1,
+                    "summary_unit_index": span["candidate_index"],
+                    "start_char": span["start_char"],
+                    "end_char": span["end_char"],
+                }
             )
-            coverage_rows.append(coverage)
-            if error:
-                error["record_index"] = document_index - 1
-                errors.append(error)
+            parent_rows.append(parent_row)
+
+    decomposition_results: list[dict[str, Any] | None] = [None] * len(parent_rows)
+    valid_indices = [
+        index
+        for index, row in enumerate(parent_rows)
+        if _source_value(row) and _parent_claim_value(row)
+    ]
+    for batch_start in range(0, len(valid_indices), model_batch_size):
+        batch_indices = valid_indices[batch_start : batch_start + model_batch_size]
+        parent_claims = [_parent_claim_value(parent_rows[index]) for index in batch_indices]
+        if len(batch_indices) == 1:
+            batch_results = [decomposer.decompose(parent_claims[0])]
         else:
-            spans = summary_spans(summary)
-            for span in spans:
-                parent_row = dict(row)
-                parent_row.update(
-                    {
-                        "source": source,
-                        "source_col": source_col,
-                        "summary_col": summary_col,
-                        "summary_text": summary,
-                        "parent_claim": span["text"],
-                        "claim": span["text"],
-                        "claim_text": span["text"],
-                        "claim_index": span["candidate_index"],
-                        "claim_count": len(spans),
-                        "record_index": document_index - 1,
-                        "summary_unit_index": span["candidate_index"],
-                        "start_char": span["start_char"],
-                        "end_char": span["end_char"],
-                    }
-                )
-                atoms, coverage, error = _decompose_parent_row(
-                    parent_row,
-                    decomposer,
-                    top_k=top_k,
-                    retrieval_mode=retrieval_mode,
-                    embedding_retriever=embedding_retriever,
-                    embedding_weight=embedding_weight,
-                )
-                atomic_rows.extend(atoms)
-                coverage_rows.append(coverage)
-                if error:
-                    error["record_index"] = document_index - 1
-                    errors.append(error)
-                if sleep_seconds > 0:
-                    time.sleep(sleep_seconds)
-        print(f"decomposed document {document_index}/{len(selected)}", flush=True)
+            batch_results = decomposer.decompose_many(parent_claims)
+        if len(batch_results) != len(batch_indices):
+            raise JudgeError(
+                f"decomposer returned {len(batch_results)} results for "
+                f"{len(batch_indices)} summary units"
+            )
+        for index, result in zip(batch_indices, batch_results):
+            decomposition_results[index] = result
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+    atomic_rows: list[dict[str, Any]] = []
+    coverage_rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for unit_index, parent_row in enumerate(parent_rows):
+        atoms, coverage, error = _decompose_parent_row(
+            parent_row,
+            decomposer,
+            top_k=top_k,
+            retrieval_mode=retrieval_mode,
+            embedding_retriever=embedding_retriever,
+            embedding_weight=embedding_weight,
+            decomposition_result=decomposition_results[unit_index],
+        )
+        atomic_rows.extend(atoms)
+        coverage_rows.append(coverage)
+        if error:
+            errors.append(error)
+        print(f"decomposed summary unit {unit_index + 1}/{len(parent_rows)}", flush=True)
     return atomic_rows, coverage_rows, errors
 
 
@@ -655,6 +748,12 @@ def main() -> int:
     parser.add_argument("--embedding_weight", type=float, default=0.5)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--sleep_seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--model_batch_size",
+        type=int,
+        default=1,
+        help="Local model generation batch size; use 1 for the safest setting",
+    )
     args = parser.parse_args()
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
@@ -662,12 +761,16 @@ def main() -> int:
         parser.error("token limits and --top_k must be positive")
     if args.embedding_batch_size < 1 or args.embedding_max_length < 1:
         parser.error("embedding batch size and max length must be positive")
+    if args.model_batch_size < 1:
+        parser.error("--model_batch_size must be positive")
     if not 0.0 <= args.embedding_weight <= 1.0:
         parser.error("--embedding_weight must be between 0 and 1")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     if args.sleep_seconds < 0:
         parser.error("--sleep_seconds must be non-negative")
+    if args.backend == "gemini" and args.model_batch_size != 1:
+        parser.error("--model_batch_size applies only to --backend local")
 
     rows = read_jsonl(Path(args.input))
     if not rows:
@@ -692,6 +795,7 @@ def main() -> int:
         embedding_weight=args.embedding_weight,
         limit=args.limit,
         sleep_seconds=args.sleep_seconds,
+        model_batch_size=args.model_batch_size,
     )
     output_path = Path(args.output)
     _write_jsonl(atomic_rows, output_path)
@@ -719,6 +823,7 @@ def main() -> int:
                 "backend": decomposer.backend_name,
                 "model": decomposer.model_name,
                 "retrieval_mode": args.retrieval_mode,
+                "model_batch_size": args.model_batch_size,
             },
             ensure_ascii=False,
             indent=2,

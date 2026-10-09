@@ -209,25 +209,30 @@ decomposer, which must preserve every independently checkable proposition as
 an exact `atomic_surface_text` span. A heading or fragment may produce zero
 atoms, but it remains visible in the coverage output instead of disappearing.
 
-For the canonical dataset (`id`, `text`, `summary`), run:
+For the canonical dataset (`id`, `text`, `summary`), run locally on the GPU:
 
 ```text
 python -m src.evaluate.atomic_claims \
-  --backend gemini --model gemini-3.5-flash-lite \
-  --input data/batch_3_cleaned.jsonl \
+  --backend local --model models/Llama-3.2-3B-Instruct \
+  --input data/your_dataset.jsonl \
   --source_col text --summary_col summary \
-  --output results/batch_3_atomic_claims.gemini.jsonl \
-  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
-  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
-  --top_k 3 --limit 1 --sleep_seconds 0.2
+  --output results/atomic_claims.local.jsonl \
+  --coverage_output results/atomic_coverage.local.jsonl \
+  --error_output results/atomic_errors.local.jsonl \
+  --device cuda --dtype bfloat16 \
+  --model_batch_size 8 \
+  --top_k 3 --limit 1
 ```
 
 For the legacy source/summary layout, keep the same command and change only
-the columns, for example `--source_col input --summary_col output`. Remove
-`--limit 1` for the full input. The atomic JSONL contains only units with at
-least one atomic proposition, so it can be judged immediately. The coverage
-JSONL contains every summary unit, including `no_atomic_claims` and `error`
-rows, and is the file to inspect when checking extraction coverage.
+the input and columns, for example
+`--input data/batch_3_cleaned.jsonl --source_col input --summary_col output`.
+Remove `--limit 1` for the full input. `--model_batch_size` controls how many summary units are generated in
+one local GPU batch; reduce it if the model runs out of memory. The atomic
+JSONL contains only units with at least one atomic proposition, so it can be
+judged immediately. The coverage JSONL contains every summary unit, including
+`no_atomic_claims` and `error` rows, and is the file to inspect when checking
+extraction coverage.
 
 The repository also supports a second-rater pass over the review JSONL. It
 uses the same five labels and writes `llm_label`, `llm_reason`,
@@ -260,7 +265,7 @@ causal or encoder-decoder Transformers checkpoint. No model download is
 allowed unless `--allow_download` is explicitly supplied:
 
 ```text
-python -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device auto --max_input_tokens 8192 --overwrite
+python -m src.evaluate.llm_claim_judge --backend local --model models/Qwen2.5-3B-Instruct --input results/batch_3_manual_review_20.jsonl --output results/batch_3_manual_review_20.local.jsonl --device cuda --dtype bfloat16 --model_batch_size 8 --max_input_tokens 8192 --overwrite
 ```
 
 The local and Gemini backends use the same prompt and output fields, making
@@ -275,27 +280,29 @@ supported. The output retains all atomic judgments and all evidence quotes.
 
 ```text
 python -m src.evaluate.atomic_claims \
-  --backend gemini --model gemini-3.5-flash-lite \
+  --backend local --model models/Llama-3.2-3B-Instruct \
   --input data/batch_3_cleaned.jsonl \
   --source_col input --summary_col output \
-  --output results/batch_3_atomic_claims.gemini.jsonl \
-  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
-  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
-  --top_k 3 --limit 1 --sleep_seconds 0.2
+  --output results/batch_3_atomic_claims.local.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.local.jsonl \
+  --error_output results/batch_3_atomic_claim_errors.local.jsonl \
+  --device cuda --dtype bfloat16 --model_batch_size 8 \
+  --top_k 3 --limit 1
 
 python -m src.evaluate.llm_claim_judge \
-  --backend gemini --model gemini-3.5-flash-lite \
-  --input results/batch_3_atomic_claims.gemini.jsonl \
-  --output results/batch_3_atomic_verdicts.gemini.jsonl --overwrite
+  --backend local --model models/Llama-3.2-3B-Instruct \
+  --input results/batch_3_atomic_claims.local.jsonl \
+  --output results/batch_3_atomic_verdicts.local.jsonl \
+  --device cuda --dtype bfloat16 --model_batch_size 8 --overwrite
 
 python -m src.evaluate.atomic_aggregate \
-  --input results/batch_3_atomic_verdicts.gemini.jsonl \
-  --output results/batch_3_parent_verdicts.gemini.jsonl
+  --input results/batch_3_atomic_verdicts.local.jsonl \
+  --output results/batch_3_parent_verdicts.local.jsonl
 ```
 
-Remove `--limit 1` for the full run. For a local model, replace the first
-command's backend/model with `--backend local --model models/Qwen2.5-3B-Instruct`.
-The atomic decomposer uses the same local-only loading behavior as the judge.
+Remove `--limit 1` for the full run. The local atomic decomposer and judge use
+the same checkpoint and local-only loading behavior. Gemini remains available
+as an explicitly separate API experiment when data-transfer approval exists.
 
 Lexical retrieval is the default and needs no extra model. An optional local
 Transformers encoder can rank evidence by cosine similarity without the
@@ -310,6 +317,7 @@ python -m src.evaluate.atomic_claims \
   --source_col input --summary_col output \
   --output results/batch_3_atomic_claims.hybrid.jsonl \
   --coverage_output results/batch_3_atomic_coverage.hybrid.jsonl \
+  --device cuda --dtype bfloat16 --model_batch_size 8 \
   --retrieval_mode hybrid \
   --embedding_model_path models/your-local-encoder \
   --embedding_device cuda --embedding_batch_size 8 \

@@ -92,32 +92,37 @@ python3 -m src.evaluate.fact_audit \
   --embedding_weight 0.5 \
   --output results/batch_3_claim_audit.hybrid.jsonl
 
-# CASE 08 - DIRECT ATOMIC CLAIMS (legacy input/output; use text/summary for new data)
+# CASE 08 - DIRECT ATOMIC CLAIMS (local GPU; legacy input/output)
 python3 -m src.evaluate.atomic_claims \
-  --backend gemini \
-  --model gemini-3.5-flash-lite \
+  --backend local \
+  --model models/Llama-3.2-3B-Instruct \
   --input data/batch_3_cleaned.jsonl \
   --source_col input \
   --summary_col output \
-  --output results/batch_3_atomic_claims.gemini.jsonl \
-  --coverage_output results/batch_3_atomic_coverage.gemini.jsonl \
-  --error_output results/batch_3_atomic_claim_errors.gemini.jsonl \
+  --output results/batch_3_atomic_claims.local.jsonl \
+  --coverage_output results/batch_3_atomic_coverage.local.jsonl \
+  --error_output results/batch_3_atomic_claim_errors.local.jsonl \
+  --device cuda \
+  --dtype bfloat16 \
+  --model_batch_size 8 \
   --top_k 3 \
-  --limit 1 \
-  --sleep_seconds 0.2
+  --limit 1
 
-# CASE 09 - JUDGE ATOMIC CLAIMS
+# CASE 09 - JUDGE ATOMIC CLAIMS (local GPU)
 python3 -m src.evaluate.llm_claim_judge \
-  --backend gemini \
-  --model gemini-3.5-flash-lite \
-  --input results/batch_3_atomic_claims.gemini.jsonl \
-  --output results/batch_3_atomic_verdicts.gemini.jsonl \
+  --backend local \
+  --model models/Llama-3.2-3B-Instruct \
+  --input results/batch_3_atomic_claims.local.jsonl \
+  --output results/batch_3_atomic_verdicts.local.jsonl \
+  --device cuda \
+  --dtype bfloat16 \
+  --model_batch_size 8 \
   --overwrite
 
 # CASE 10 - AGGREGATE ATOMIC JUDGMENTS TO PARENT CLAIMS
 python3 -m src.evaluate.atomic_aggregate \
-  --input results/batch_3_atomic_verdicts.gemini.jsonl \
-  --output results/batch_3_parent_verdicts.gemini.jsonl
+  --input results/batch_3_atomic_verdicts.local.jsonl \
+  --output results/batch_3_parent_verdicts.local.jsonl
 
 # CASE 11 - LOCAL ATOMIC CLAIMS WITH HYBRID RETRIEVAL
 python3 -m src.evaluate.atomic_claims \
@@ -130,6 +135,7 @@ python3 -m src.evaluate.atomic_claims \
   --coverage_output results/batch_3_atomic_coverage.local_hybrid.jsonl \
   --device cuda \
   --dtype bfloat16 \
+  --model_batch_size 8 \
   --retrieval_mode hybrid \
   --embedding_model_path models/your-local-encoder \
   --embedding_device cuda \

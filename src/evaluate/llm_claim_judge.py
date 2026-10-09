@@ -522,6 +522,10 @@ class LocalClaimJudge:
             self.model.to(device)
         self.model.eval()
         self.is_encoder_decoder = bool(getattr(self.model.config, "is_encoder_decoder", False))
+        if not self.is_encoder_decoder:
+            # Left padding keeps the generated continuation aligned across a
+            # variable-length causal-LM batch.
+            self.tokenizer.padding_side = "left"
         self.input_device = next(self.model.parameters()).device
 
     def _model_prompt(self, system_prompt: str, user_prompt: str) -> str:
@@ -553,10 +557,17 @@ class LocalClaimJudge:
         return system_prompt + "\n\n" + user_prompt + "\n\nJSON response:\n"
 
     def generate_text(self, system_prompt: str, user_prompt: str) -> str:
-        prompt = self._model_prompt(system_prompt, user_prompt)
+        return self.generate_text_batch(system_prompt, [user_prompt])[0]
+
+    def generate_text_batch(self, system_prompt: str, user_prompts: list[str]) -> list[str]:
+        """Generate one response per prompt in one local Transformers batch."""
+        if not user_prompts:
+            return []
+        prompts = [self._model_prompt(system_prompt, prompt) for prompt in user_prompts]
         inputs = self.tokenizer(
-            prompt,
+            prompts,
             return_tensors="pt",
+            padding=True,
             truncation=True,
             max_length=self.max_input_tokens,
         )
@@ -569,12 +580,17 @@ class LocalClaimJudge:
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
-        if self.is_encoder_decoder:
-            generated_tokens = generated[0]
-        else:
-            input_length = inputs["input_ids"].shape[-1]
-            generated_tokens = generated[0][input_length:]
-        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        input_length = inputs["input_ids"].shape[-1]
+        responses: list[str] = []
+        for index in range(len(user_prompts)):
+            if self.is_encoder_decoder:
+                generated_tokens = generated[index]
+            else:
+                generated_tokens = generated[index][input_length:]
+            responses.append(
+                self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            )
+        return responses
 
     def judge(self, row: dict[str, Any]) -> dict[str, Any]:
         self.last_raw_response = ""
@@ -599,6 +615,52 @@ class LocalClaimJudge:
         judgment["raw_response"] = attempts[-1]
         judgment["raw_attempts"] = attempts
         return judgment
+
+    def judge_many(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Judge rows in a batch; malformed rows fall back to single repair calls."""
+        if not rows:
+            return []
+        texts = self.generate_text_batch(
+            JUDGE_SYSTEM_PROMPT,
+            [build_judge_prompt(row) for row in rows],
+        )
+        if len(texts) != len(rows):
+            raise RuntimeError(
+                f"local batch returned {len(texts)} responses for {len(rows)} rows"
+            )
+        results: list[dict[str, Any]] = []
+        for row, text in zip(rows, texts):
+            attempts = [text]
+            self.last_raw_response = text
+            self.last_raw_attempts = attempts.copy()
+            try:
+                judgment = parse_judgment(text)
+                _validate_evidence_quotes(judgment, row)
+            except JudgeError as first_error:
+                try:
+                    repaired = self.generate_text(
+                        JUDGE_SYSTEM_PROMPT,
+                        _judge_repair_prompt(row, text),
+                    )
+                    attempts.append(repaired)
+                    self.last_raw_response = "\n--- repair attempt ---\n".join(attempts)
+                    self.last_raw_attempts = attempts.copy()
+                    judgment = parse_judgment(repaired)
+                    _validate_evidence_quotes(judgment, row)
+                except Exception as repair_error:
+                    results.append(
+                        {
+                            "_error": f"{type(repair_error).__name__}: {repair_error}",
+                            "raw_response": attempts[-1],
+                            "raw_attempts": attempts,
+                            "first_error": str(first_error),
+                        }
+                    )
+                    continue
+            judgment["raw_response"] = attempts[-1]
+            judgment["raw_attempts"] = attempts
+            results.append(judgment)
+        return results
 
 
 class TemplateError(Exception):
@@ -682,7 +744,10 @@ def run_judgment(
     overwrite: bool = False,
     sleep_seconds: float = 0.0,
     fail_fast: bool = False,
+    model_batch_size: int = 1,
 ) -> list[dict[str, Any]]:
+    if model_batch_size < 1:
+        raise ValueError("model_batch_size must be positive")
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not (resume or overwrite):
@@ -694,37 +759,77 @@ def run_judgment(
         selected = [row for row in selected if not str(row.get("human_label", "")).strip()]
     mode = "a" if resume else "w"
     processed = list(existing_rows)
+    pending = [
+        (position, row)
+        for position, row in enumerate(selected, offset + 1)
+        if _row_key(row) not in existing_keys
+    ]
+    total_position = offset + len(selected)
     with path.open(mode, encoding="utf-8", newline="\n") as stream:
-        for position, row in enumerate(selected, offset + 1):
-            if _row_key(row) in existing_keys:
-                continue
+        for batch_start in range(0, len(pending), model_batch_size):
+            batch = pending[batch_start : batch_start + model_batch_size]
+            batch_rows = [row for _position, row in batch]
+            batch_results: list[dict[str, Any] | None]
+            batch_judge = getattr(judge, "judge_many", None)
             try:
-                judgment = judge.judge(row)
-                annotated = _annotated_row(
-                    row,
-                    backend=getattr(judge, "backend_name", judge.__class__.__name__),
-                    model_name=judge.model_name,
-                    judgment=judgment,
-                )
-            except Exception as exc:  # keep a row-level error and continue by default
+                if model_batch_size > 1 and callable(batch_judge):
+                    batch_results = list(batch_judge(batch_rows))
+                    if len(batch_results) != len(batch_rows):
+                        raise RuntimeError(
+                            f"local batch returned {len(batch_results)} responses for "
+                            f"{len(batch_rows)} rows"
+                        )
+                else:
+                    batch_results = [None] * len(batch_rows)
+            except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-                LOGGER.error("row %d failed: %s", position, message)
+                LOGGER.error("batch starting at row %d failed: %s", batch[0][0], message)
                 if fail_fast:
                     raise
-                annotated = _annotated_row(
-                    row,
-                    backend=getattr(judge, "backend_name", judge.__class__.__name__),
-                    model_name=judge.model_name,
-                    judgment={
+                batch_results = [
+                    {
+                        "_error": message,
                         "raw_response": getattr(judge, "last_raw_response", ""),
                         "raw_attempts": list(getattr(judge, "last_raw_attempts", [])),
-                    },
-                    error_message=message,
-                )
-            _write_jsonl_row(stream, annotated)
-            processed.append(annotated)
-            existing_keys.add(_row_key(row))
-            print(f"judged {position}/{offset + len(selected)}", flush=True)
+                    }
+                    for _row in batch_rows
+                ]
+
+            for (position, row), batch_result in zip(batch, batch_results):
+                try:
+                    judgment = (
+                        batch_result
+                        if batch_result is not None
+                        else judge.judge(row)
+                    )
+                    if judgment.get("_error"):
+                        raise RuntimeError(str(judgment["_error"]))
+                    annotated = _annotated_row(
+                        row,
+                        backend=getattr(judge, "backend_name", judge.__class__.__name__),
+                        model_name=judge.model_name,
+                        judgment=judgment,
+                    )
+                except Exception as exc:  # keep a row-level error and continue by default
+                    message = f"{type(exc).__name__}: {exc}"
+                    LOGGER.error("row %d failed: %s", position, message)
+                    if fail_fast:
+                        raise
+                    error_judgment = batch_result or {
+                        "raw_response": getattr(judge, "last_raw_response", ""),
+                        "raw_attempts": list(getattr(judge, "last_raw_attempts", [])),
+                    }
+                    annotated = _annotated_row(
+                        row,
+                        backend=getattr(judge, "backend_name", judge.__class__.__name__),
+                        model_name=judge.model_name,
+                        judgment=error_judgment,
+                        error_message=message,
+                    )
+                _write_jsonl_row(stream, annotated)
+                processed.append(annotated)
+                existing_keys.add(_row_key(row))
+                print(f"judged {position}/{total_position}", flush=True)
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
     _write_summary(processed, path)
@@ -752,16 +857,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--sleep_seconds", type=float, default=0.0, help="Delay between requests")
+    parser.add_argument(
+        "--model_batch_size",
+        type=int,
+        default=1,
+        help="Local model generation batch size; use 1 for the safest setting",
+    )
     parser.add_argument("--fail_fast", action="store_true")
     args = parser.parse_args()
     if args.offset < 0 or (args.limit is not None and args.limit < 1):
         parser.error("--offset must be non-negative and --limit must be positive")
     if args.max_input_tokens < 1 or args.max_new_tokens < 1:
         parser.error("token limits must be positive")
+    if args.model_batch_size < 1:
+        parser.error("--model_batch_size must be positive")
     if args.sleep_seconds < 0:
         parser.error("--sleep_seconds must be non-negative")
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
+    if args.backend == "gemini" and args.model_batch_size != 1:
+        parser.error("--model_batch_size applies only to --backend local")
     return args
 
 
@@ -804,6 +919,7 @@ def main() -> int:
         overwrite=args.overwrite,
         sleep_seconds=args.sleep_seconds,
         fail_fast=args.fail_fast,
+        model_batch_size=args.model_batch_size,
     )
     print(f"LLM judgment written to {args.output}")
     print(f"Summary written to {Path(args.output).with_suffix('.summary.json')}")

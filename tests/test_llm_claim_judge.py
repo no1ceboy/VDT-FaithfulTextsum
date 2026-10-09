@@ -27,6 +27,27 @@ class FakeJudge:
         }
 
 
+class FakeBatchJudge(FakeJudge):
+    backend_name = "local"
+
+    def __init__(self) -> None:
+        self.batch_calls = 0
+
+    def judge_many(self, rows):
+        self.batch_calls += 1
+        return [
+            {
+                "label": "supported",
+                "reason": "The source states the same fact.",
+                "evidence_quote": row["source"],
+                "confidence": 0.9,
+                "raw_response": '{"label":"supported"}',
+                "raw_attempts": ['{"label":"supported"}'],
+            }
+            for row in rows
+        ]
+
+
 class LLMClaimJudgeTests(unittest.TestCase):
     def test_prompt_keeps_claim_and_source_separate(self) -> None:
         prompt = build_judge_prompt(
@@ -107,6 +128,25 @@ class LLMClaimJudgeTests(unittest.TestCase):
         self.assertEqual(summary["rows_judged"], 1)
         self.assertEqual(summary["rows_error"], 1)
         self.assertEqual(summary["human_llm_agreement"], 1.0)
+
+    def test_run_uses_local_batch_judge_when_requested(self) -> None:
+        rows = [
+            {"id": "1", "source": "A.", "claim": "A.", "evidence": []},
+            {"id": "2", "source": "B.", "claim": "B.", "evidence": []},
+        ]
+        judge = FakeBatchJudge()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "judged.jsonl"
+            result = run_judgment(
+                rows,
+                judge,
+                output,
+                overwrite=True,
+                model_batch_size=2,
+            )
+        self.assertEqual(judge.batch_calls, 1)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(row["judge_status"] == "ok" for row in result))
 
     def test_judgment_errors_preserve_raw_attempts(self) -> None:
         class FailingJudge:

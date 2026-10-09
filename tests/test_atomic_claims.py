@@ -25,6 +25,18 @@ class FakeAtomicGenerator:
         return self.response
 
 
+class FakeBatchAtomicGenerator(FakeAtomicGenerator):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses[0])
+        self.responses = responses
+        self.batch_calls = 0
+
+    def generate_text_batch(self, system_prompt: str, user_prompts: list[str]) -> list[str]:
+        del system_prompt, user_prompts
+        self.batch_calls += 1
+        return self.responses
+
+
 class AtomicClaimTests(unittest.TestCase):
     def test_decomposition_requires_exact_surface_spans(self) -> None:
         parent = "Alice won the award, and Bob published the report."
@@ -139,6 +151,46 @@ class AtomicClaimTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(coverage[0]["decomposition_status"], "no_atomic_claims")
         self.assertEqual(coverage[0]["atomic_claim_count"], 0)
+
+    def test_direct_mode_batches_local_summary_units(self) -> None:
+        generator = FakeBatchAtomicGenerator(
+            [
+                json.dumps(
+                    {
+                        "atomic_claims": [
+                            {
+                                "surface_text": "Alice won",
+                                "verification_text": "Alice won.",
+                            }
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "atomic_claims": [
+                            {
+                                "surface_text": "Bob published",
+                                "verification_text": "Bob published.",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        rows, coverage, errors = decompose_original_records(
+            [
+                {"id": "doc-1", "text": "Alice won.", "summary": "Alice won."},
+                {"id": "doc-2", "text": "Bob published.", "summary": "Bob published."},
+            ],
+            AtomicClaimDecomposer(generator),
+            source_col="text",
+            summary_col="summary",
+            model_batch_size=2,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(generator.batch_calls, 1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(coverage), 2)
 
     def test_aggregate_is_conservative_and_keeps_all_quotes(self) -> None:
         rows = [
