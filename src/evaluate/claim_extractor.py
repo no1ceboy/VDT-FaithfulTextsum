@@ -249,6 +249,7 @@ class ClaimnessClassifier:
         self.generator = generator
         self.backend_name = generator.backend_name
         self.model_name = generator.model_name
+        self.inference_backend = getattr(generator, "inference_backend", self.backend_name)
         self.last_raw_response = ""
         self.last_raw_attempts: list[str] = []
 
@@ -323,6 +324,7 @@ def _base_output_row(
         "is_claim": result["is_claim"],
         "claimness_reason": result["reason"],
         "claimness_backend": classifier.backend_name,
+        "claimness_inference_backend": classifier.inference_backend,
         "claimness_model": classifier.model_name,
         "claimness_status": "ok",
         "claimness_raw": result.get("raw_response", ""),
@@ -389,6 +391,7 @@ def extract_rows(
                         "end_char": span["end_char"],
                         "candidate_index": span["candidate_index"],
                         "claimness_backend": classifier.backend_name,
+                        "claimness_inference_backend": classifier.inference_backend,
                         "claimness_model": classifier.model_name,
                         "claimness_status": "error",
                         "claimness_error": f"{type(exc).__name__}: {exc}",
@@ -447,6 +450,11 @@ def _make_classifier(args: argparse.Namespace) -> ClaimnessClassifier:
         max_input_tokens=args.max_input_tokens,
         max_new_tokens=args.max_new_tokens,
         allow_download=args.allow_download,
+        inference_backend=args.inference_backend,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
+        vllm_max_model_length=args.vllm_max_model_length,
+        seed=args.seed,
     )
     return ClaimnessClassifier(generator)
 
@@ -470,6 +478,16 @@ def main() -> int:
     parser.add_argument("--max_input_tokens", type=int, default=8192)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--allow_download", action="store_true")
+    parser.add_argument(
+        "--inference_backend",
+        choices=("transformers", "vllm"),
+        default="transformers",
+        help="Decoder-only local generation backend",
+    )
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.80)
+    parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--vllm_max_model_length", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
         "--split_clauses",
@@ -489,6 +507,14 @@ def main() -> int:
         parser.error("--sleep_seconds must be non-negative")
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
+    if args.backend == "gemini" and args.inference_backend != "transformers":
+        parser.error("--inference_backend applies only to --backend local")
+    if not 0.0 < args.vllm_gpu_memory_utilization <= 1.0:
+        parser.error("--vllm_gpu_memory_utilization must be in (0, 1]")
+    if args.vllm_tensor_parallel_size < 1:
+        parser.error("--vllm_tensor_parallel_size must be positive")
+    if args.vllm_max_model_length is not None and args.vllm_max_model_length < 1:
+        parser.error("--vllm_max_model_length must be positive")
     if args.split_clauses and args.no_split_clauses:
         parser.error("--split_clauses and --no_split_clauses cannot be used together")
     rows = read_jsonl(Path(args.input))
@@ -518,6 +544,7 @@ def main() -> int:
                 "non_claims": len(non_claims),
                 "errors": len(errors),
                 "backend": classifier.backend_name,
+                "inference_backend": classifier.inference_backend,
                 "model": classifier.model_name,
             },
             ensure_ascii=False,

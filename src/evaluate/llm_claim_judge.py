@@ -1,11 +1,12 @@
-"""Judge claim support with Gemini's REST API or a local Transformers model.
+"""Judge claim support with Gemini's REST API or a local LLM.
 
 The input is the JSONL emitted by ``manual_review`` or ``fact_audit``.  The
 judge receives the source document, one claim, and retrieved evidence, then
 writes a separate ``llm_*`` result without overwriting ``human_label``.
 
 The Gemini backend uses only Python's standard library.  The local backend
-loads an already available Transformers checkpoint and is offline by default.
+can use either Transformers or a provisioned vLLM runtime and is offline by
+default.
 """
 
 from __future__ import annotations
@@ -457,7 +458,11 @@ class GeminiClaimJudge:
 
 
 class LocalClaimJudge:
-    """Run the same judge prompt through a local causal or seq2seq checkpoint."""
+    """Run the judge through a local Transformers or vLLM checkpoint.
+
+    vLLM is available for decoder-only checkpoints such as Llama and Qwen.
+    Encoder-decoder checkpoints remain on the Transformers path.
+    """
 
     backend_name = "local"
 
@@ -470,15 +475,16 @@ class LocalClaimJudge:
         max_input_tokens: int = 8192,
         max_new_tokens: int = 256,
         allow_download: bool = False,
+        inference_backend: str = "transformers",
+        vllm_gpu_memory_utilization: float = 0.80,
+        vllm_tensor_parallel_size: int = 1,
+        vllm_max_model_length: int | None = None,
+        seed: int = 42,
     ) -> None:
-        try:
-            import torch
-            from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "The local backend requires the existing torch and transformers environment"
-            ) from exc
-        self.torch = torch
+        if inference_backend not in {"transformers", "vllm"}:
+            raise ValueError("inference_backend must be transformers or vllm")
+        self.inference_backend = inference_backend
+        self._vllm_generator: Any | None = None
         self.model_name = str(model_path)
         self.max_input_tokens = max_input_tokens
         self.max_new_tokens = max_new_tokens
@@ -487,6 +493,33 @@ class LocalClaimJudge:
         path = Path(model_path)
         if not path.is_dir():
             raise FileNotFoundError(f"Local judge model folder not found: {path}")
+
+        if inference_backend == "vllm":
+            from ..inference.vllm_backend import VLLMTextGenerator
+
+            self._vllm_generator = VLLMTextGenerator(
+                path,
+                dtype=dtype if dtype != "float32" else "auto",
+                max_input_tokens=max_input_tokens,
+                max_new_tokens=max_new_tokens,
+                gpu_memory_utilization=vllm_gpu_memory_utilization,
+                tensor_parallel_size=vllm_tensor_parallel_size,
+                max_model_length=vllm_max_model_length,
+                seed=seed,
+                allow_download=allow_download,
+            )
+            self.tokenizer = self._vllm_generator.tokenizer
+            self.is_encoder_decoder = False
+            return
+
+        try:
+            import torch
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "The local backend requires the existing torch and transformers environment"
+            ) from exc
+        self.torch = torch
         local_files_only = not allow_download
         config = AutoConfig.from_pretrained(str(path), local_files_only=local_files_only)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -563,6 +596,8 @@ class LocalClaimJudge:
         """Generate one response per prompt in one local Transformers batch."""
         if not user_prompts:
             return []
+        if self._vllm_generator is not None:
+            return self._vllm_generator.generate_text_batch(system_prompt, user_prompts)
         prompts = [self._model_prompt(system_prompt, prompt) for prompt in user_prompts]
         inputs = self.tokenizer(
             prompts,
@@ -672,6 +707,7 @@ def _annotated_row(
     *,
     backend: str,
     model_name: str,
+    inference_backend: str = "",
     judgment: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> dict[str, Any]:
@@ -683,6 +719,7 @@ def _annotated_row(
     output.update(
         {
             "judge_backend": backend,
+            "judge_inference_backend": inference_backend,
             "judge_model": model_name,
             "judge_status": "error" if error_message else "ok",
             "judge_error": error_message or "",
@@ -807,6 +844,7 @@ def run_judgment(
                     annotated = _annotated_row(
                         row,
                         backend=getattr(judge, "backend_name", judge.__class__.__name__),
+                        inference_backend=getattr(judge, "inference_backend", ""),
                         model_name=judge.model_name,
                         judgment=judgment,
                     )
@@ -822,6 +860,7 @@ def run_judgment(
                     annotated = _annotated_row(
                         row,
                         backend=getattr(judge, "backend_name", judge.__class__.__name__),
+                        inference_backend=getattr(judge, "inference_backend", ""),
                         model_name=judge.model_name,
                         judgment=error_judgment,
                         error_message=message,
@@ -851,6 +890,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max_input_tokens", type=int, default=8192)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--allow_download", action="store_true", help="Allow local Transformers downloads")
+    parser.add_argument(
+        "--inference_backend",
+        choices=("transformers", "vllm"),
+        default="transformers",
+        help="Decoder-only local generation backend",
+    )
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.80)
+    parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--vllm_max_model_length", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, help="Judge only the next N input rows")
     parser.add_argument("--only_unlabeled", action="store_true")
@@ -875,6 +924,14 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--sleep_seconds must be non-negative")
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
+    if args.backend == "gemini" and args.inference_backend != "transformers":
+        parser.error("--inference_backend applies only to --backend local")
+    if not 0.0 < args.vllm_gpu_memory_utilization <= 1.0:
+        parser.error("--vllm_gpu_memory_utilization must be in (0, 1]")
+    if args.vllm_tensor_parallel_size < 1:
+        parser.error("--vllm_tensor_parallel_size must be positive")
+    if args.vllm_max_model_length is not None and args.vllm_max_model_length < 1:
+        parser.error("--vllm_max_model_length must be positive")
     if args.backend == "gemini" and args.model_batch_size != 1:
         parser.error("--model_batch_size applies only to --backend local")
     return args
@@ -897,6 +954,11 @@ def _make_judge(args: argparse.Namespace) -> ClaimJudge:
         max_input_tokens=args.max_input_tokens,
         max_new_tokens=args.max_new_tokens,
         allow_download=args.allow_download,
+        inference_backend=args.inference_backend,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
+        vllm_max_model_length=args.vllm_max_model_length,
+        seed=args.seed,
     )
 
 

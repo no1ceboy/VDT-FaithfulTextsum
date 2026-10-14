@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.training.grpo_data import build_prompt, validate_prepared_record  # noqa: E402
+
+
+def _installed_version(package: str) -> str | None:
+    try:
+        return version(package)
+    except PackageNotFoundError:
+        return None
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -129,6 +137,16 @@ def main() -> int:
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--max_input_tokens", type=int, default=4096)
+    parser.add_argument(
+        "--inference_backend",
+        choices=("transformers", "vllm"),
+        default="transformers",
+        help="Local decoder-only generation backend",
+    )
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.80)
+    parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--vllm_max_model_length", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     try:
@@ -173,6 +191,12 @@ def main() -> int:
             raise FileExistsError(f"Refusing to replace existing manifest: {manifest_path}")
         if args.batch_size < 1 or args.max_new_tokens < 1 or args.max_input_tokens < 1:
             raise ValueError("batch_size, max_new_tokens, and max_input_tokens must be positive")
+        if not 0.0 < args.vllm_gpu_memory_utilization <= 1.0:
+            raise ValueError("vllm_gpu_memory_utilization must be in (0, 1]")
+        if args.vllm_tensor_parallel_size < 1:
+            raise ValueError("vllm_tensor_parallel_size must be positive")
+        if args.vllm_max_model_length is not None and args.vllm_max_model_length < 1:
+            raise ValueError("vllm_max_model_length must be positive")
 
         rows = _read_jsonl(input_path)
         existing = _read_existing(existing_path) if existing_path else None
@@ -208,9 +232,7 @@ def main() -> int:
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
             hub_kwargs = {"local_files_only": True}
         import torch
-        from peft import PeftModel
-        from importlib.metadata import version
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer
 
         if not torch.cuda.is_available():
             raise RuntimeError("Generation requires a CUDA GPU")
@@ -220,8 +242,6 @@ def main() -> int:
             model_dtype = torch.float16
         else:
             model_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        from transformers import AutoConfig
-
         model_config = AutoConfig.from_pretrained(base_model_ref, **hub_kwargs)
         context_limit = getattr(model_config, "max_position_embeddings", None)
         tokenizer = AutoTokenizer.from_pretrained(base_model_ref, **hub_kwargs)
@@ -230,13 +250,36 @@ def main() -> int:
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
-        model = AutoModelForCausalLM.from_pretrained(
-            base_model_ref, torch_dtype=model_dtype, **hub_kwargs
-        )
-        if adapter_path:
-            model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
-        model.to("cuda")
-        model.eval()
+        model = None
+        vllm_generator = None
+        if args.inference_backend == "vllm":
+            from src.inference.vllm_backend import VLLMTextGenerator
+
+            vllm_generator = VLLMTextGenerator(
+                model_path=str(model_path) if adapter_path else base_model_ref,
+                base_model_path=base_model_ref if adapter_path else None,
+                adapter_path=str(adapter_path) if adapter_path else None,
+                dtype=args.dtype if args.dtype != "auto" else "auto",
+                max_input_tokens=args.max_input_tokens,
+                max_new_tokens=args.max_new_tokens,
+                gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                tensor_parallel_size=args.vllm_tensor_parallel_size,
+                max_model_length=args.vllm_max_model_length,
+                seed=args.seed,
+                allow_download=args.online,
+            )
+            tokenizer = vllm_generator.tokenizer
+        else:
+            from peft import PeftModel
+            from transformers import AutoModelForCausalLM
+
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model_ref, torch_dtype=model_dtype, **hub_kwargs
+            )
+            if adapter_path:
+                model = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
+            model.to("cuda")
+            model.eval()
 
         prompt_lengths = [
             len(tokenizer.apply_chat_template(row["prompt"], tokenize=True, add_generation_prompt=True))
@@ -258,6 +301,11 @@ def main() -> int:
                 f"Longest prompt plus generation cap exceeds model context ({context_limit}); "
                 "reduce --max_new_tokens or prepare shorter inputs."
             )
+        if args.vllm_max_model_length and max(prompt_lengths) + args.max_new_tokens > args.vllm_max_model_length:
+            raise ValueError(
+                "Longest prompt plus generation cap exceeds --vllm_max_model_length; "
+                "increase it or reduce the token limits."
+            )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = output_path.with_name(output_path.name + ".partial")
         if temporary_path.exists():
@@ -266,26 +314,38 @@ def main() -> int:
             with temporary_path.open("x", encoding="utf-8", newline="\n") as stream:
                 for start in range(0, len(rows), args.batch_size):
                     batch = rows[start : start + args.batch_size]
+                    print(
+                        f"Generating {start + 1}-{start + len(batch)}/{len(rows)} "
+                        f"with {args.inference_backend}...",
+                        flush=True,
+                    )
                     rendered = [
                         tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
                         for prompt in (row["prompt"] for row in batch)
                     ]
-                    tokens = tokenizer(
-                        rendered,
-                        return_tensors="pt",
-                        padding=True,
-                        add_special_tokens=False,
-                    ).to("cuda")
-                    with torch.inference_mode():
-                        generated = model.generate(
-                            **tokens,
-                            do_sample=False,
-                            max_new_tokens=args.max_new_tokens,
-                            pad_token_id=tokenizer.pad_token_id,
-                            eos_token_id=tokenizer.eos_token_id,
+                    if vllm_generator is not None:
+                        texts = vllm_generator.generate_prompts(rendered)
+                    else:
+                        tokens = tokenizer(
+                            rendered,
+                            return_tensors="pt",
+                            padding=True,
+                            add_special_tokens=False,
                         )
-                    prompt_width = tokens["input_ids"].shape[1]
-                    texts = tokenizer.batch_decode(generated[:, prompt_width:], skip_special_tokens=True)
+                        tokens = tokens.to("cuda")
+                        with torch.inference_mode():
+                            generated = model.generate(
+                                **tokens,
+                                do_sample=False,
+                                max_new_tokens=args.max_new_tokens,
+                                pad_token_id=tokenizer.pad_token_id,
+                                eos_token_id=tokenizer.eos_token_id,
+                            )
+                        prompt_width = tokens["input_ids"].shape[1]
+                        texts = tokenizer.batch_decode(
+                            generated[:, prompt_width:],
+                            skip_special_tokens=True,
+                        )
                     for row, text in zip(batch, texts):
                         result = (
                             dict(existing[str(row["id"])])
@@ -325,9 +385,15 @@ def main() -> int:
                 "max_new_tokens": args.max_new_tokens,
                 "batch_size": args.batch_size,
             },
+            "inference_backend": args.inference_backend,
+            "vllm": {
+                "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                "tensor_parallel_size": args.vllm_tensor_parallel_size,
+                "max_model_length": args.vllm_max_model_length,
+            },
             "runtime_versions": {
-                package: version(package)
-                for package in ("torch", "transformers", "peft")
+                package: _installed_version(package)
+                for package in ("torch", "transformers", "peft", "vllm")
             },
             "cuda_version": torch.version.cuda,
             "gpu_name": torch.cuda.get_device_name(torch.cuda.current_device()),

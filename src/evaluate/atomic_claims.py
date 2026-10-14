@@ -176,6 +176,7 @@ class AtomicClaimDecomposer:
         self.generator = generator
         self.backend_name = generator.backend_name
         self.model_name = generator.model_name
+        self.inference_backend = getattr(generator, "inference_backend", self.backend_name)
         self.last_raw_response = ""
         self.last_raw_attempts: list[str] = []
 
@@ -335,6 +336,7 @@ def _coverage_row(
             "atomic_claim_count": len(atomic_claims),
             "atomic_claim_indices": [item.get("atomic_claim_index") for item in atomic_claims],
             "decomposition_backend": decomposer.backend_name,
+            "decomposition_inference_backend": decomposer.inference_backend,
             "decomposition_model": decomposer.model_name,
             "decomposition_status": status,
             "decomposition_raw": result.get("raw_response", decomposer.last_raw_response),
@@ -416,6 +418,7 @@ def _decompose_parent_row(
                     "evidence": evidence,
                     "retrieval_mode": retrieval_mode,
                     "decomposition_backend": decomposer.backend_name,
+                    "decomposition_inference_backend": decomposer.inference_backend,
                     "decomposition_model": decomposer.model_name,
                     "decomposition_status": "ok",
                     "decomposition_raw": result["raw_response"],
@@ -691,6 +694,11 @@ def _make_decomposer(args: argparse.Namespace) -> AtomicClaimDecomposer:
             max_input_tokens=args.max_input_tokens,
             max_new_tokens=args.max_new_tokens,
             allow_download=args.allow_download,
+            inference_backend=args.inference_backend,
+            vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+            vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
+            vllm_max_model_length=args.vllm_max_model_length,
+            seed=args.seed,
         )
     )
 
@@ -736,6 +744,16 @@ def main() -> int:
     parser.add_argument("--max_input_tokens", type=int, default=8192)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--allow_download", action="store_true")
+    parser.add_argument(
+        "--inference_backend",
+        choices=("transformers", "vllm"),
+        default="transformers",
+        help="Decoder-only local generation backend",
+    )
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.80)
+    parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--vllm_max_model_length", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--top_k", type=int, default=3)
     parser.add_argument("--retrieval_mode", choices=("lexical", "embedding", "hybrid"), default="lexical")
     parser.add_argument("--embedding_model_path")
@@ -757,6 +775,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.backend == "gemini" and args.allow_download:
         parser.error("--allow_download applies only to --backend local")
+    if args.backend == "gemini" and args.inference_backend != "transformers":
+        parser.error("--inference_backend applies only to --backend local")
+    if not 0.0 < args.vllm_gpu_memory_utilization <= 1.0:
+        parser.error("--vllm_gpu_memory_utilization must be in (0, 1]")
+    if args.vllm_tensor_parallel_size < 1:
+        parser.error("--vllm_tensor_parallel_size must be positive")
+    if args.vllm_max_model_length is not None and args.vllm_max_model_length < 1:
+        parser.error("--vllm_max_model_length must be positive")
     if args.max_input_tokens < 1 or args.max_new_tokens < 1 or args.top_k < 1:
         parser.error("token limits and --top_k must be positive")
     if args.embedding_batch_size < 1 or args.embedding_max_length < 1:
@@ -821,6 +847,7 @@ def main() -> int:
                 ),
                 "errors": len(errors),
                 "backend": decomposer.backend_name,
+                "inference_backend": decomposer.inference_backend,
                 "model": decomposer.model_name,
                 "retrieval_mode": args.retrieval_mode,
                 "model_batch_size": args.model_batch_size,

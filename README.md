@@ -73,6 +73,22 @@ Keep extracted assets in `models/` inside the repository (ignored by Git). Use `
 
 The included MiniCheck FLAN-T5 adapter and AlignScore adapter can run together. They no longer import their upstream Python packages and use the shared PyTorch/Transformers stack. These are inference-only ports and should be score-checked against upstream before treating results as interchangeable. NLTK and its approved `punkt_tab` resource are still needed for sentence splitting. ROUGE and BERTScore compare a candidate summary to `human_sum`, not to the input document; the human-reference row is left null to avoid a misleading self-match of 1.0. FENICE and QAFactEval are supported as optional upstream adapters, but not in the shared environment: FENICE pins Transformers ~=4.38.2 and QAFactEval uses an older QA/AllenNLP stack. Run each in an IT-provisioned compatible environment and combine outputs by record ID. FENICE explicitly extracts summary claims before NLI alignment; QAFactEval generates QA pairs and scores answer consistency. Both were developed primarily for English, so treat Vietnamese results as exploratory.
 
+### Local LLM generation backends
+
+The decoder-only LLM paths support `--inference_backend transformers` and
+`--inference_backend vllm`. Use vLLM on the company GPU for
+`scripts/generate_summaries.py`, direct atomic extraction, the legacy
+claimness extractor, and the local atomic judge. vLLM batches requests through
+one loaded model and records the selected backend in generation manifests and
+judge rows. The company environment must already provide a compatible vLLM
+build; the repository cannot replace that compiled runtime by copying Python
+files. Set `CUDA_VISIBLE_DEVICES` before the command when selecting a GPU.
+
+vLLM is intentionally not used for FactCC, mFACT, MiniCheck, AlignScore, or
+the embedding retriever. Those are classifier, encoder, or encoder-decoder
+models and remain on their existing local Transformers/PyTorch adapters. The
+canonical vLLM commands are in `company_machine_commands.txt`.
+
 ## Package layout and CLI
 
 Reusable code lives in `src/data/`, `src/evaluate/`, and `src/training/`. From the repository root, launch evaluation with `python -m src.evaluate.run_eval`; launch cleaning with `python -m src.data.clean_dataset`. No project installation or custom `PYTHONPATH` is needed. The `scripts/run_eval.py` file remains a convenience wrapper. Running from source does not require installing this project.
@@ -303,6 +319,30 @@ python -m src.evaluate.atomic_aggregate \
 Remove `--limit 1` for the full run. The local atomic decomposer and judge use
 the same checkpoint and local-only loading behavior. Gemini remains available
 as an explicitly separate API experiment when data-transfer approval exists.
+
+To report how often each summary system is contradicted or left unsupported,
+run the dependency-free atomic report after auditing both the human and LLM
+summaries. The two atomic files must be judged against the same source data;
+the parent files come from `atomic_aggregate`:
+
+```text
+python -m src.evaluate.atomic_report \
+  --atomic_input human=results/human_atomic_verdicts.local.jsonl \
+  --atomic_input llm=results/llm_atomic_verdicts.local.jsonl \
+  --parent_input human=results/human_parent_verdicts.local.jsonl \
+  --parent_input llm=results/llm_parent_verdicts.local.jsonl \
+  --output results/atomic_faithfulness_report.html
+```
+
+The command writes an HTML report and adjacent JSON data. It reports atomic
+support, direct contradiction, unsupported-content, and potential-hallucination
+rates, plus the fraction of parent summaries and documents containing at least
+one flagged atomic proposition. `Potential hallucination` combines
+`contradicted` and `not_supported`; the latter means the source was
+insufficient and is not by itself proof that the claim is false. Human and LLM
+atomic propositions are compared by rates because their decompositions need
+not produce the same atomic spans; parent results are also paired by document
+ID when both files are available.
 
 Lexical retrieval is the default and needs no extra model. An optional local
 Transformers encoder can rank evidence by cosine similarity without the

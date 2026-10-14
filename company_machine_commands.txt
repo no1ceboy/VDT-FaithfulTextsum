@@ -25,6 +25,8 @@ python3 -m src.evaluate.atomic_claims \
   --error_output results/atomic_errors.local.jsonl \
   --device cuda \
   --dtype bfloat16 \
+  --inference_backend vllm \
+  --vllm_gpu_memory_utilization 0.70 \
   --model_batch_size 8 \
   --top_k 3
 
@@ -36,6 +38,8 @@ python3 -m src.evaluate.llm_claim_judge \
   --output results/atomic_verdicts.local.jsonl \
   --device cuda \
   --dtype bfloat16 \
+  --inference_backend vllm \
+  --vllm_gpu_memory_utilization 0.70 \
   --model_batch_size 8 \
   --overwrite
 
@@ -44,7 +48,28 @@ python3 -m src.evaluate.atomic_aggregate \
   --input results/atomic_verdicts.local.jsonl \
   --output results/parent_verdicts.local.jsonl
 
-# CASE 05 - PREPARE TRAINING SPLITS (canonical id/text/summary format)
+# CASE 05 - REPORT HUMAN VS LLM ATOMIC FAITHFULNESS
+# Run CASE 02-04 once for each summary system, using separate output names.
+python3 -m src.evaluate.atomic_report \
+  --atomic_input human=results/human_atomic_verdicts.local.jsonl \
+  --atomic_input llm=results/llm_atomic_verdicts.local.jsonl \
+  --parent_input human=results/human_parent_verdicts.local.jsonl \
+  --parent_input llm=results/llm_parent_verdicts.local.jsonl \
+  --output results/atomic_faithfulness_report.html
+
+# CASE 06 - GENERATE SUMMARIES WITH LOCAL vLLM
+# For a LoRA adapter, add: --base_model models/Llama-3.2-3B-Instruct
+CUDA_VISIBLE_DEVICES=0 python3 scripts/generate_summaries.py \
+  --model models/Llama-3.2-3B-Instruct \
+  --input_jsonl data/training_cleaned.jsonl \
+  --output outputs/llama32_3b_vllm.jsonl \
+  --summary_col llm_sum \
+  --inference_backend vllm \
+  --batch_size 8 \
+  --max_new_tokens 256 \
+  --vllm_gpu_memory_utilization 0.80
+
+# CASE 07 - PREPARE TRAINING SPLITS (canonical id/text/summary format)
 python3 scripts/prepare_grpo_data.py \
   --input data/training_cleaned.jsonl \
   --source_col text \
@@ -54,7 +79,7 @@ python3 scripts/prepare_grpo_data.py \
   --test_fraction 0.1 \
   --seed 42
 
-# CASE 06 - EXPERIMENT A: LORA + FACTCC + REFERENCE REWARD
+# CASE 08 - EXPERIMENT A: LORA + FACTCC + REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
   --train_jsonl results/training_splits/train.jsonl \
@@ -86,7 +111,7 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 07 - EXPERIMENT B: LORA + FACTCC WITHOUT REFERENCE REWARD
+# CASE 09 - EXPERIMENT B: LORA + FACTCC WITHOUT REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
   --train_jsonl results/training_splits/train.jsonl \
@@ -118,7 +143,7 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 08 - EXPERIMENT C: LORA + MINICHECK + REFERENCE REWARD
+# CASE 10 - EXPERIMENT C: LORA + MINICHECK + REFERENCE REWARD
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
   --train_jsonl results/training_splits/train.jsonl \
@@ -150,7 +175,7 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 09 - EXPERIMENT D: QLORA + FACTCC
+# CASE 11 - EXPERIMENT D: QLORA + FACTCC
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
   --train_jsonl results/training_splits/train.jsonl \
@@ -181,7 +206,7 @@ python3 -m src.training.train_grpo \
   --precision bf16 \
   --seed 42
 
-# CASE 10 - EXPERIMENT E: FULL FINE-TUNING + FACTCC
+# CASE 12 - EXPERIMENT E: FULL FINE-TUNING + FACTCC
 python3 -m src.training.train_grpo \
   --model models/Llama-3.2-3B-Instruct \
   --train_jsonl results/training_splits/train.jsonl \
